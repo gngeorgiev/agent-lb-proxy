@@ -25,8 +25,7 @@ func main() {
 
 func run(argv []string) int {
 	if len(argv) == 0 {
-		printUsage()
-		return 2
+		return runCodex(argv)
 	}
 
 	switch argv[0] {
@@ -389,7 +388,7 @@ Examples:
 func runStatus(argv []string) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	root := fs.String("root", "", "State directory")
-	proxyURL := fs.String("proxy-url", "", "Proxy URL (default: http://<listen-from-store>)")
+	proxyURL := fs.String("proxy-url", "", "Proxy URL (default: run.proxy_url or http://<listen-from-store>)")
 	timeout := fs.Duration("timeout", 3*time.Second, "HTTP timeout for status request")
 	jsonOut := fs.Bool("json", false, "Print raw JSON status output")
 	shortOut := fs.Bool("short", false, "Print one-line status for status bars")
@@ -425,7 +424,11 @@ Examples:
 	snapshot := store.Snapshot()
 	url := *proxyURL
 	if strings.TrimSpace(url) == "" {
-		url = "http://" + snapshot.Settings.Proxy.Listen
+		if snapshot.Settings.Run.ProxyURL != "" {
+			url = snapshot.Settings.Run.ProxyURL
+		} else {
+			url = "http://" + snapshot.Settings.Proxy.Listen
+		}
 	}
 	url = strings.TrimRight(url, "/") + "/status"
 

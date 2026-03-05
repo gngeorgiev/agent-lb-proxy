@@ -127,6 +127,34 @@ func TestRunCommandOnlyPrintsWrappedCommand(t *testing.T) {
 	}
 }
 
+func TestNoSubcommandDefaultsToRun(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	fakeLog := filepath.Join(root, "fake-codex.log")
+	fakeBin := filepath.Join(root, "codex")
+	writeFakeCodex(t, fakeBin)
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEXLB_CODEX_BIN", fakeBin)
+	t.Setenv("FAKE_LOG", fakeLog)
+
+	if code := run([]string{}); code != 0 {
+		t.Fatalf("default invocation failed: %d", code)
+	}
+
+	data, err := os.ReadFile(fakeLog)
+	if err != nil {
+		t.Fatalf("read fake log: %v", err)
+	}
+	logLine := string(data)
+	if !strings.Contains(logLine, "OPENAI_BASE_URL=http://127.0.0.1:8765") {
+		t.Fatalf("missing default OPENAI_BASE_URL in log: %s", logLine)
+	}
+}
+
 func TestE2EConfiguredLoginCommand(t *testing.T) {
 	root := t.TempDir()
 	fakeLog := filepath.Join(root, "fake-codex.log")

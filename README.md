@@ -301,7 +301,7 @@ Flags:
 | Flag | Description |
 |---|---|
 | `--root` | State directory (for default proxy URL resolution) |
-| `--proxy-url` | Explicit proxy URL |
+| `--proxy-url` | Explicit proxy URL (default `run.proxy_url`, else `http://<listen-from-store>`) |
 | `--timeout` | HTTP timeout (default `3s`) |
 | `--short` | One-line output for status bars |
 | `--json` | Raw JSON output |

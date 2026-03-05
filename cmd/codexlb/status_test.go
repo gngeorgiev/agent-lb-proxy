@@ -103,6 +103,37 @@ func TestStatusCommandJSONAndShortMutuallyExclusive(t *testing.T) {
 	}
 }
 
+func TestStatusCommandDefaultsToRunProxyURL(t *testing.T) {
+	status := lb.ProxyStatus{GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/status" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(status)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	store, err := lb.OpenStore(root)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	cfg := store.Snapshot().Settings
+	cfg.Run.ProxyURL = server.URL
+	cfg.Proxy.Listen = "127.0.0.1:1"
+	if err := lb.WriteSettingsConfig(root, cfg); err != nil {
+		t.Fatalf("write settings config: %v", err)
+	}
+
+	_, code := captureStdout(func() int {
+		return run([]string{"status", "--root", root})
+	})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+}
+
 func captureStdout(fn func() int) (string, int) {
 	orig := os.Stdout
 	r, w, _ := os.Pipe()
