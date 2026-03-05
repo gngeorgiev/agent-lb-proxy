@@ -33,3 +33,32 @@ func TestSetAccountHeaders(t *testing.T) {
 		t.Fatalf("chatgpt account header mismatch: %q", got)
 	}
 }
+
+func TestShouldDisableForAuthFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		status      int
+		path        string
+		wantDisable bool
+	}{
+		{name: "401 always disables", status: http.StatusUnauthorized, path: "/", wantDisable: true},
+		{name: "403 responses disables", status: http.StatusForbidden, path: "/responses", wantDisable: true},
+		{name: "403 v1 responses disables", status: http.StatusForbidden, path: "/v1/responses", wantDisable: true},
+		{name: "403 chat completions disables", status: http.StatusForbidden, path: "/chat/completions", wantDisable: true},
+		{name: "403 models does not disable", status: http.StatusForbidden, path: "/models", wantDisable: false},
+		{name: "403 root does not disable", status: http.StatusForbidden, path: "/", wantDisable: false},
+		{name: "500 does not disable", status: http.StatusInternalServerError, path: "/responses", wantDisable: false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldDisableForAuthFailure(tt.status, tt.path); got != tt.wantDisable {
+				t.Fatalf("shouldDisableForAuthFailure(%d, %q) = %t, want %t", tt.status, tt.path, got, tt.wantDisable)
+			}
+		})
+	}
+}

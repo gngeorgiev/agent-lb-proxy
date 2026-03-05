@@ -62,8 +62,22 @@ func isRetryableStatus(status int) bool {
 	return status == http.StatusTooManyRequests || (status >= 500 && status <= 599)
 }
 
-func isAuthStatus(status int) bool {
-	return status == http.StatusUnauthorized || status == http.StatusForbidden
+func shouldDisableForAuthFailure(status int, requestPath string) bool {
+	if status == http.StatusUnauthorized {
+		return true
+	}
+	if status != http.StatusForbidden {
+		return false
+	}
+	return isAccountScopedPath(requestPath)
+}
+
+func isAccountScopedPath(requestPath string) bool {
+	requestPath = strings.ToLower(requestPath)
+	return requestPath == "/responses" ||
+		strings.Contains(requestPath, "/v1/responses") ||
+		strings.Contains(requestPath, "/chat/completions") ||
+		strings.Contains(requestPath, "/backend-api/codex/responses")
 }
 
 func defaultBackoffSeconds(status int, fallback int) int {

@@ -96,6 +96,16 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true,"service":"codexlb-proxy"}`)
+		p.logEvent("request.completed", map[string]any{
+			"req_id": reqID,
+			"status": http.StatusOK,
+			"path":   r.URL.Path,
+		})
+		return
+	}
 	if r.URL.Path == "/logs" {
 		p.handleLogs(w, r)
 		p.logEvent("request.completed", map[string]any{
@@ -183,7 +193,7 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now tim
 			continue
 		}
 
-		if isAuthStatus(resp.StatusCode) {
+		if shouldDisableForAuthFailure(resp.StatusCode, r.URL.Path) {
 			bodySnippet := readBodySnippet(resp.Body, maxDisableBodyLogBytes)
 			_ = resp.Body.Close()
 			p.markDisabled(account.ID, fmt.Sprintf("http-%d", resp.StatusCode))
@@ -318,7 +328,7 @@ func (p *ProxyServer) handleWebsocket(w http.ResponseWriter, r *http.Request, no
 		setAccountHeaders(req.Header, auth)
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		if isAuthStatus(resp.StatusCode) {
+		if shouldDisableForAuthFailure(resp.StatusCode, r.URL.Path) {
 			p.markDisabled(account.ID, fmt.Sprintf("http-%d", resp.StatusCode))
 			p.logEvent("account.disabled", map[string]any{
 				"req_id":     reqID,

@@ -254,6 +254,98 @@ func TestProxyDisablesAccountOn401(t *testing.T) {
 	}
 }
 
+func TestProxyDoesNotDisableAccountOn403ForNonAccountPath(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	store, err := OpenStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	tokenA := testJWT(map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-a"}})
+	homeA := filepath.Join(tmp, "acc-a")
+	writeAuthFile(t, homeA, tokenA, "acct-a")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/wham/usage":
+			_, _ = io.WriteString(w, `{"rate_limit":{"primary_window":{"used_percent":50},"secondary_window":{"used_percent":50}}}`)
+			return
+		case "/backend-api/models":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":"forbidden"}`)
+			return
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Settings.Proxy.UpstreamBaseURL = upstream.URL + "/backend-api"
+		sf.Settings.Proxy.MaxAttempts = 3
+		sf.Settings.Policy.Mode = PolicySticky
+		sf.Accounts = []Account{
+			{ID: "a", Alias: "a", HomeDir: homeA, BaseURL: sf.Settings.Proxy.UpstreamBaseURL, Enabled: true},
+		}
+		sf.State.ActiveIndex = 0
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	proxySrv := httptest.NewServer(NewProxyServer(store, nil, nil))
+	defer proxySrv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, proxySrv.URL+"/models", nil)
+	if err != nil {
+		t.Fatalf("build GET /models: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /models: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 403, got %d body=%s", resp.StatusCode, string(body))
+	}
+
+	snap := store.Snapshot()
+	if !snap.Accounts[0].Enabled {
+		t.Fatalf("expected account to remain enabled")
+	}
+	if snap.Accounts[0].DisabledReason != "" {
+		t.Fatalf("expected empty disabled reason, got %q", snap.Accounts[0].DisabledReason)
+	}
+}
+
+func TestProxyRootEndpointIsLocalHealth(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	store, err := OpenStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	proxySrv := httptest.NewServer(NewProxyServer(store, nil, nil))
+	defer proxySrv.Close()
+
+	resp, err := http.Get(proxySrv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, string(body))
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "codexlb-proxy") {
+		t.Fatalf("expected local root response body, got %q", string(body))
+	}
+}
+
 func TestProxyReloadedPolicyAppliesWithoutRestart(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
