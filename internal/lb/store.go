@@ -16,20 +16,20 @@ type Store struct {
 	root string
 	path string
 
-	mu                sync.Mutex
-	data              StoreFile
-	runtimeOverrides  RuntimeSettingsOverrides
+	mu               sync.Mutex
+	data             StoreFile
+	runtimeOverrides RuntimeSettingsOverrides
 }
 
 type RuntimeSettingsOverrides struct {
-	Listen                 *string
-	UpstreamBaseURL        *string
-	MaxAttempts            *int
-	UsageTimeoutMS         *int
-	CooldownDefaultSeconds *int
-	RefreshIntervalMinutes *int
+	Listen                  *string
+	UpstreamBaseURL         *string
+	MaxAttempts             *int
+	UsageTimeoutMS          *int
+	CooldownDefaultSeconds  *int
+	RefreshIntervalMinutes  *int
 	RefreshIntervalMessages *int
-	CacheTTLMinutes        *int
+	CacheTTLMinutes         *int
 }
 
 type SettingsReloadSummary struct {
@@ -39,6 +39,13 @@ type SettingsReloadSummary struct {
 	Previous              Settings
 	Current               Settings
 	UpdatedAccountBaseURL int
+}
+
+type storeFilePersisted struct {
+	Version   int          `json:"version"`
+	UpdatedAt string       `json:"updated_at"`
+	State     RuntimeState `json:"state"`
+	Accounts  []Account    `json:"accounts"`
 }
 
 func DefaultRootDir() (string, error) {
@@ -308,10 +315,14 @@ func applyRuntimeOverrides(sf *StoreFile, overrides RuntimeSettingsOverrides) {
 	}
 }
 
-func storeFileForPersistence(in StoreFile) StoreFile {
+func storeFileForPersistence(in StoreFile) storeFilePersisted {
 	out := cloneStore(in)
-	out.Settings = Settings{}
-	return out
+	return storeFilePersisted{
+		Version:   out.Version,
+		UpdatedAt: out.UpdatedAt,
+		State:     out.State,
+		Accounts:  out.Accounts,
+	}
 }
 
 func (s *Store) reconcileAccountsFromDisk() error {
