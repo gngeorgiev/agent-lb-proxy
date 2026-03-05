@@ -29,6 +29,8 @@ type ProxyServer struct {
 	requestSeq      atomic.Uint64
 }
 
+const maxDisableBodyLogBytes = 2048
+
 func NewProxyServer(store *Store, logger *log.Logger, events *EventLogger) *ProxyServer {
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -77,7 +79,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/status" {
 		now := time.Now()
 		p.expireCooldowns(now)
-		p.maybeRefreshQuota(r.Context(), now)
+		p.maybeRefreshQuota(r.Context(), now, true)
 		snapshot := p.store.Snapshot()
 		status := BuildProxyStatus(snapshot, now)
 		w.Header().Set("Content-Type", "application/json")
@@ -93,7 +95,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	p.expireCooldowns(now)
-	p.maybeRefreshQuota(r.Context(), now)
+	p.maybeRefreshQuota(r.Context(), now, false)
 
 	if isWebSocketUpgrade(r) {
 		p.handleWebsocket(w, r, now, reqID)
@@ -169,6 +171,7 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now tim
 		}
 
 		if isAuthStatus(resp.StatusCode) {
+			bodySnippet := readBodySnippet(resp.Body, maxDisableBodyLogBytes)
 			_ = resp.Body.Close()
 			p.markDisabled(account.ID, fmt.Sprintf("http-%d", resp.StatusCode))
 			lastResp = resp
@@ -177,7 +180,13 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now tim
 				"attempt":    attempt,
 				"account_id": account.ID,
 				"status":     resp.StatusCode,
+				"path":       r.URL.Path,
+				"method":     r.Method,
+				"error_body": bodySnippet,
 			})
+			if p.logger != nil {
+				p.logger.Printf("account disabled id=%s status=%d method=%s path=%s body=%q", account.ID, resp.StatusCode, r.Method, r.URL.Path, bodySnippet)
+			}
 			continue
 		}
 
@@ -428,7 +437,7 @@ func (p *ProxyServer) expireCooldowns(now time.Time) {
 	})
 }
 
-func (p *ProxyServer) maybeRefreshQuota(ctx context.Context, now time.Time) {
+func (p *ProxyServer) maybeRefreshQuota(ctx context.Context, now time.Time, force bool) {
 	if !p.refreshInFlight.CompareAndSwap(false, true) {
 		return
 	}
@@ -436,15 +445,14 @@ func (p *ProxyServer) maybeRefreshQuota(ctx context.Context, now time.Time) {
 
 	snapshot := p.store.Snapshot()
 	for _, account := range snapshot.Accounts {
-		if !account.Enabled || account.DisabledReason != "" {
-			continue
-		}
-		if !dueForQuotaRefresh(account, snapshot.State, snapshot.Settings.Quota, now) {
+		if !force && !dueForQuotaRefresh(account, snapshot.State, snapshot.Settings.Quota, now) {
 			continue
 		}
 		auth, err := LoadAuth(account.HomeDir)
 		if err != nil {
-			p.markDisabled(account.ID, "missing-auth")
+			if !force {
+				p.markDisabled(account.ID, "missing-auth")
+			}
 			continue
 		}
 		timeout := time.Duration(max(1, snapshot.Settings.Proxy.UsageTimeoutMS)) * time.Millisecond
@@ -456,15 +464,21 @@ func (p *ProxyServer) maybeRefreshQuota(ctx context.Context, now time.Time) {
 			p.logEvent("quota.refresh_failed", map[string]any{
 				"account_id": account.ID,
 				"error":      err.Error(),
+				"force":      force,
 			})
 			if p.logger != nil {
-				p.logger.Printf("quota refresh failed for %s: %v", account.ID, err)
+				p.logger.Printf("quota refresh failed account=%s force=%t error=%v", account.ID, force, err)
 			}
 			continue
 		}
 		updated.Quota.LastSyncMessageCounter = snapshot.State.MessageCounter
 		updated.ChatGPTAccountID = auth.ChatGPTAccountID
 		updated.UserEmail = auth.UserEmail
+		updated.Enabled = true
+		updated.DisabledReason = ""
+		if account.DisabledReason != "" {
+			updated.LastSwitchReason = "quota-refresh-recovered"
+		}
 
 		_ = p.store.Update(func(sf *StoreFile) error {
 			idx := slices.IndexFunc(sf.Accounts, func(a Account) bool { return a.ID == account.ID })
@@ -474,16 +488,35 @@ func (p *ProxyServer) maybeRefreshQuota(ctx context.Context, now time.Time) {
 			sf.Accounts[idx].Quota = updated.Quota
 			sf.Accounts[idx].ChatGPTAccountID = updated.ChatGPTAccountID
 			sf.Accounts[idx].UserEmail = updated.UserEmail
+			sf.Accounts[idx].Enabled = updated.Enabled
+			sf.Accounts[idx].DisabledReason = updated.DisabledReason
+			if updated.LastSwitchReason != "" {
+				sf.Accounts[idx].LastSwitchReason = updated.LastSwitchReason
+			}
 			return nil
 		})
 		p.logEvent("quota.refreshed", map[string]any{
-			"account_id":   account.ID,
-			"daily_limit":  updated.Quota.DailyLimit,
-			"daily_used":   updated.Quota.DailyUsed,
-			"weekly_limit": updated.Quota.WeeklyLimit,
-			"weekly_used":  updated.Quota.WeeklyUsed,
+			"account_id":      account.ID,
+			"daily_limit":     updated.Quota.DailyLimit,
+			"daily_used":      updated.Quota.DailyUsed,
+			"weekly_limit":    updated.Quota.WeeklyLimit,
+			"weekly_used":     updated.Quota.WeeklyUsed,
+			"force":           force,
+			"recovered_from":  account.DisabledReason,
+			"last_sync_at_ms": updated.Quota.LastSyncAt,
 		})
 	}
+}
+
+func readBodySnippet(r io.Reader, maxBytes int) string {
+	if r == nil || maxBytes <= 0 {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(r, int64(maxBytes)))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(body))
 }
 
 func (p *ProxyServer) logEvent(event string, fields map[string]any) {

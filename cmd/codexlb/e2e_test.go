@@ -155,6 +155,77 @@ func TestNoSubcommandDefaultsToRun(t *testing.T) {
 	}
 }
 
+func TestAccountPinAndUnpin(t *testing.T) {
+	root := t.TempDir()
+	store, err := lb.OpenStore(root)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	sourceA := filepath.Join(root, "source-a")
+	if err := os.MkdirAll(sourceA, 0o700); err != nil {
+		t.Fatalf("mkdir source-a: %v", err)
+	}
+	tokenA := testJWT(map[string]any{
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-a"},
+	})
+	if err := os.WriteFile(filepath.Join(sourceA, "auth.json"), []byte(`{"tokens":{"access_token":"`+tokenA+`","account_id":"acct-a"}}`), 0o600); err != nil {
+		t.Fatalf("write source-a auth: %v", err)
+	}
+	if err := lb.ImportAccount(store, "alice", sourceA); err != nil {
+		t.Fatalf("import alice: %v", err)
+	}
+
+	sourceB := filepath.Join(root, "source-b")
+	if err := os.MkdirAll(sourceB, 0o700); err != nil {
+		t.Fatalf("mkdir source-b: %v", err)
+	}
+	tokenB := testJWT(map[string]any{
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-b"},
+	})
+	if err := os.WriteFile(filepath.Join(sourceB, "auth.json"), []byte(`{"tokens":{"access_token":"`+tokenB+`","account_id":"acct-b"}}`), 0o600); err != nil {
+		t.Fatalf("write source-b auth: %v", err)
+	}
+	if err := lb.ImportAccount(store, "bob", sourceB); err != nil {
+		t.Fatalf("import bob: %v", err)
+	}
+
+	if code := run([]string{"account", "pin", "--root", root, "alice"}); code != 0 {
+		t.Fatalf("account pin failed: %d", code)
+	}
+	reloaded, err := lb.OpenStore(root)
+	if err != nil {
+		t.Fatalf("reopen store after pin: %v", err)
+	}
+	if got := reloaded.Snapshot().State.PinnedAccountID; got != "openai:alice" {
+		t.Fatalf("expected pinned account openai:alice, got %q", got)
+	}
+
+	if code := run([]string{"account", "unpin", "--root", root}); code != 0 {
+		t.Fatalf("account unpin failed: %d", code)
+	}
+	reloaded, err = lb.OpenStore(root)
+	if err != nil {
+		t.Fatalf("reopen store after unpin: %v", err)
+	}
+	if got := reloaded.Snapshot().State.PinnedAccountID; got != "" {
+		t.Fatalf("expected pinned account to be cleared, got %q", got)
+	}
+}
+
+func TestAccountPinUnknownAlias(t *testing.T) {
+	root := t.TempDir()
+	errOut, code := captureStderr(func() int {
+		return run([]string{"account", "pin", "--root", root, "missing"})
+	})
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+	if !strings.Contains(errOut, "alias not found") {
+		t.Fatalf("expected alias-not-found error, got: %s", errOut)
+	}
+}
+
 func TestE2EConfiguredLoginCommand(t *testing.T) {
 	root := t.TempDir()
 	fakeLog := filepath.Join(root, "fake-codex.log")

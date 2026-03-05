@@ -177,6 +177,10 @@ func runAccount(argv []string) int {
 		return runAccountList(argv[1:])
 	case "rm":
 		return runAccountRemove(argv[1:])
+	case "pin":
+		return runAccountPin(argv[1:])
+	case "unpin":
+		return runAccountUnpin(argv[1:])
 	case "help", "-h", "--help":
 		printAccountUsage()
 		return 0
@@ -337,6 +341,92 @@ Flags:
 		return 1
 	}
 	fmt.Printf("removed account %s\n", args[0])
+	return 0
+}
+
+func runAccountPin(argv []string) int {
+	fs := flag.NewFlagSet("account pin", flag.ContinueOnError)
+	root := fs.String("root", "", "State directory")
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), `Usage: codexlb account pin [flags] <alias>
+
+Pins account selection to a specific alias while it remains healthy.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(argv); err != nil {
+		return parseFlagError(err)
+	}
+	args := fs.Args()
+	if len(args) != 1 {
+		fs.Usage()
+		return 2
+	}
+	alias := args[0]
+
+	store, err := lb.OpenStore(*root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+		return 1
+	}
+	snapshot := store.Snapshot()
+	pinnedID := ""
+	for _, account := range snapshot.Accounts {
+		if account.Alias == alias {
+			pinnedID = account.ID
+			break
+		}
+	}
+	if pinnedID == "" {
+		fmt.Fprintf(os.Stderr, "pin account: alias not found: %s\n", alias)
+		return 1
+	}
+	if err := store.Update(func(sf *lb.StoreFile) error {
+		sf.State.PinnedAccountID = pinnedID
+		return nil
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "pin account: %v\n", err)
+		return 1
+	}
+	fmt.Printf("pinned account %s\n", alias)
+	return 0
+}
+
+func runAccountUnpin(argv []string) int {
+	fs := flag.NewFlagSet("account unpin", flag.ContinueOnError)
+	root := fs.String("root", "", "State directory")
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), `Usage: codexlb account unpin [flags]
+
+Clears pinned account selection.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(argv); err != nil {
+		return parseFlagError(err)
+	}
+	if len(fs.Args()) != 0 {
+		fs.Usage()
+		return 2
+	}
+
+	store, err := lb.OpenStore(*root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+		return 1
+	}
+	if err := store.Update(func(sf *lb.StoreFile) error {
+		sf.State.PinnedAccountID = ""
+		return nil
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "unpin account: %v\n", err)
+		return 1
+	}
+	fmt.Println("unpinned account selection")
 	return 0
 }
 
@@ -556,6 +646,8 @@ Subcommands:
   import  import auth.json from existing CODEX_HOME
   list    show registered accounts
   rm      remove an account
+  pin     pin account selection to alias
+  unpin   clear pinned account selection
 
 Run 'codexlb account <subcommand> --help' for detailed flags.
 `)
@@ -569,7 +661,7 @@ Usage:
 
 Commands:
   proxy    Run the local load-balancing proxy
-  account  Manage enrolled accounts (login/import/list/rm)
+  account  Manage enrolled accounts (login/import/list/rm/pin/unpin)
   status   Show runtime status table from running proxy
   run      Run codex with proxy endpoint environment wiring
 

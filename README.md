@@ -247,6 +247,26 @@ Usage:
 codexlb account rm [--root DIR] <alias>
 ```
 
+### `codexlb account pin`
+
+Pin selection to a specific account alias.
+
+Usage:
+
+```bash
+codexlb account pin [--root DIR] <alias>
+```
+
+### `codexlb account unpin`
+
+Clear pinned account selection.
+
+Usage:
+
+```bash
+codexlb account unpin [--root DIR]
+```
+
 ### `codexlb run`
 
 Run Codex with proxy env wiring.
