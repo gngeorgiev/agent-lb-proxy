@@ -35,7 +35,13 @@ go build ./cmd/codexlb
 ./codexlb proxy --listen 127.0.0.1:8765 --upstream https://chatgpt.com/backend-api
 ```
 
-3) Run codex through proxy:
+3) Check live proxy/account state:
+
+```bash
+./codexlb status
+```
+
+4) Run codex through proxy:
 
 ```bash
 ./codexlb run
@@ -60,6 +66,8 @@ Example event types:
 - `account.cooldown`
 - `account.disabled`
 - `quota.refreshed`
+- `config.reloaded`
+- `config.reload_failed`
 
 ## `config.toml` Tuning
 
@@ -94,7 +102,9 @@ cache_ttl_minutes = 30
 Notes:
 
 - Startup loads settings from `config.toml` into runtime state.
+- While `codexlb proxy` is running, it polls `config.toml` and reloads changes automatically (default every 1s).
 - `codexlb proxy` CLI flags override settings for that run and persist the new values back to `config.toml`.
+- Changing `proxy.listen` in `config.toml` is detected but does not rebind the running server socket; restart proxy to apply that field.
 
 ## Account Selection Algorithm
 
@@ -174,6 +184,11 @@ Flags:
 - `--quota-refresh-messages` usage refresh interval by successful message count
 - `--quota-cache-ttl-minutes` quota cache TTL used by freshness checks
 
+Runtime behavior:
+
+- `config.toml` changes are hot-reloaded while proxy runs.
+- `proxy.listen` changes are logged but require restart to take effect.
+
 Examples:
 
 ```bash
@@ -243,6 +258,7 @@ Environment set by wrapper:
 - `OPENAI_BASE_URL` -> local proxy URL
 - `OPENAI_API_KEY` -> `codex-lb-local-key` if not already set
 - `CODEX_HOME` -> wrapper runtime home (`~/.codex-lb/runtime` by default)
+- if `CODEX_HOME/auth.json` is missing, wrapper seeds it from an enrolled account to avoid interactive login prompts
 
 Flags:
 
@@ -250,11 +266,38 @@ Flags:
 - `--proxy-url` override proxy URL (default: `http://<listen-from-store>`)
 - `--codex-bin` codex executable path
 - `--codex-home` runtime `CODEX_HOME` used for wrapped codex process
+- `--command` print wrapped command and exit without executing codex
 
 Usage:
 
 ```bash
-codexlb run [--root DIR] [--proxy-url URL] [--codex-bin PATH] [--codex-home DIR] [<codex-args...>]
+codexlb run [--root DIR] [--proxy-url URL] [--codex-bin PATH] [--codex-home DIR] [--command] [<codex-args...>]
+```
+
+### `codexlb status`
+
+Queries `GET /status` from the running proxy and renders a table similar to `agentlb status`.
+
+Table columns include:
+
+- active marker (`*`) and pin marker (`P`)
+- alias/id/email
+- status (`ready`, `cooldown(...)`, `disabled(...)`)
+- daily/weekly left percentages
+- computed score
+- last switch reason and quota source
+
+Flags:
+
+- `--root` state directory (used to resolve default proxy URL)
+- `--proxy-url` explicit proxy URL override
+- `--timeout` HTTP timeout for status request (default `3s`)
+- `--json` print raw JSON instead of table
+
+Usage:
+
+```bash
+codexlb status [--root DIR] [--proxy-url URL] [--timeout 3s] [--json]
 ```
 
 ## Make Targets
@@ -262,10 +305,12 @@ codexlb run [--root DIR] [--proxy-url URL] [--codex-bin PATH] [--codex-home DIR]
 ```bash
 make help
 make build
+make install
 make test
 make test-real
 make fmt
 make run-proxy
+make status
 make install-daemons
 make uninstall-daemons
 make install-systemd
@@ -277,11 +322,15 @@ Configurable make variables:
 - `ROOT` (default `~/.codex-lb`)
 - `LISTEN` (default `127.0.0.1:8765`)
 - `UPSTREAM` (default `https://chatgpt.com/backend-api`)
+- `PREFIX` (default `/usr/local`)
+- `BINDIR` (default `$(PREFIX)/bin`)
+- `DESTDIR` (default empty; optional staging root for package installs)
 
 Example:
 
 ```bash
 make run-proxy LISTEN=127.0.0.1:9000
+make install PREFIX=$HOME/.local
 ```
 
 ## Daemon Installation

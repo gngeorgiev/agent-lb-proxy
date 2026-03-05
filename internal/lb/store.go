@@ -19,6 +19,15 @@ type Store struct {
 	data StoreFile
 }
 
+type SettingsReloadSummary struct {
+	Changed               bool
+	UpstreamChanged       bool
+	ListenChangeIgnored   bool
+	Previous              Settings
+	Current               Settings
+	UpdatedAccountBaseURL int
+}
+
 func DefaultRootDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -111,15 +120,42 @@ func (s *Store) PersistSettingsToConfig() error {
 	return WriteSettingsConfig(s.root, s.data.Settings)
 }
 
-func (s *Store) ReloadSettingsFromConfig() error {
+func (s *Store) ReloadSettingsFromConfig() (SettingsReloadSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	settings, err := loadOrCreateSettingsConfig(s.root, s.data.Settings)
+	prev := s.data.Settings
+	settings, err := loadOrCreateSettingsConfig(s.root, prev)
 	if err != nil {
-		return err
+		return SettingsReloadSummary{}, err
 	}
+	summary := SettingsReloadSummary{
+		Previous: prev,
+		Current:  settings,
+		Changed:  settings != prev,
+	}
+
+	// Listen address is bound by the running HTTP server and needs a restart.
+	if settings.Proxy.Listen != prev.Proxy.Listen {
+		summary.ListenChangeIgnored = true
+		settings.Proxy.Listen = prev.Proxy.Listen
+		summary.Current.Proxy.Listen = prev.Proxy.Listen
+	}
+	if settings.Proxy.UpstreamBaseURL != prev.Proxy.UpstreamBaseURL {
+		summary.UpstreamChanged = true
+		for i := range s.data.Accounts {
+			if s.data.Accounts[i].BaseURL == "" || s.data.Accounts[i].BaseURL == prev.Proxy.UpstreamBaseURL {
+				s.data.Accounts[i].BaseURL = settings.Proxy.UpstreamBaseURL
+				summary.UpdatedAccountBaseURL++
+			}
+		}
+	}
+
+	summary.Changed = summary.Changed || summary.ListenChangeIgnored || summary.UpdatedAccountBaseURL > 0
 	s.data.Settings = settings
-	return writeJSONAtomic(s.path, s.data)
+	if !summary.Changed {
+		return summary, nil
+	}
+	return summary, writeJSONAtomic(s.path, s.data)
 }
 
 func writeJSONAtomic(path string, v any) error {

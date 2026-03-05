@@ -3,30 +3,40 @@ SHELL := /bin/bash
 GO ?= go
 BINARY ?= codexlb
 CMD ?= ./cmd/codexlb
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+DESTDIR ?=
 
 ROOT ?= $(HOME)/.codex-lb
 LISTEN ?= 127.0.0.1:8765
 UPSTREAM ?= https://chatgpt.com/backend-api
 
-.PHONY: help build test test-real fmt clean run-proxy install-daemons uninstall-daemons install-systemd install-launchd uninstall-systemd uninstall-launchd
+.PHONY: help build install test test-real fmt clean run-proxy status install-daemons uninstall-daemons install-systemd install-launchd uninstall-systemd uninstall-launchd
 
 help:
 	@echo "Targets:"
 	@echo "  make build              Build $(BINARY)"
+	@echo "  make install            Build and install $(BINARY) to $(DESTDIR)$(BINDIR)"
 	@echo "  make test               Run unit/integration/e2e tests (fake codex)"
 	@echo "  make test-real          Run tests including real codex endpoint override check"
 	@echo "  make fmt                Format Go code"
 	@echo "  make clean              Remove build artifacts"
 	@echo "  make run-proxy          Build and run local proxy"
+	@echo "  make status             Query running proxy status table"
 	@echo "  make install-daemons    Install daemon for current OS (systemd user or launchd)"
 	@echo "  make uninstall-daemons  Uninstall daemon for current OS"
 	@echo "  make install-systemd    Force install systemd --user unit"
 	@echo "  make install-launchd    Force install macOS launchd agent"
 	@echo ""
-	@echo "Config vars: ROOT=$(ROOT) LISTEN=$(LISTEN) UPSTREAM=$(UPSTREAM)"
+	@echo "Config vars: ROOT=$(ROOT) LISTEN=$(LISTEN) UPSTREAM=$(UPSTREAM) PREFIX=$(PREFIX) BINDIR=$(BINDIR) DESTDIR=$(DESTDIR)"
 
 build:
 	$(GO) build -o $(BINARY) $(CMD)
+
+install: build
+	install -d "$(DESTDIR)$(BINDIR)"
+	install -m 0755 "$(BINARY)" "$(DESTDIR)$(BINDIR)/$(BINARY)"
+	@echo "Installed $(BINARY) -> $(DESTDIR)$(BINDIR)/$(BINARY)"
 
 test:
 	$(GO) test ./...
@@ -42,6 +52,9 @@ clean:
 
 run-proxy: build
 	./$(BINARY) proxy --root "$(ROOT)" --listen "$(LISTEN)" --upstream "$(UPSTREAM)"
+
+status: build
+	./$(BINARY) status --root "$(ROOT)" --proxy-url "http://$(LISTEN)"
 
 install-daemons: build
 	./scripts/install-daemon.sh --binary "$(PWD)/$(BINARY)" --root "$(ROOT)" --listen "$(LISTEN)" --upstream "$(UPSTREAM)"

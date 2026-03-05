@@ -2,6 +2,7 @@ package lb
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -250,6 +251,141 @@ func TestProxyDisablesAccountOn401(t *testing.T) {
 	}
 	if snap.Accounts[0].DisabledReason != "http-401" {
 		t.Fatalf("unexpected disable reason: %s", snap.Accounts[0].DisabledReason)
+	}
+}
+
+func TestProxyReloadedPolicyAppliesWithoutRestart(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	store, err := OpenStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	tokenA := testJWT(map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-a"}})
+	tokenB := testJWT(map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-b"}})
+	homeA := filepath.Join(tmp, "acc-a")
+	homeB := filepath.Join(tmp, "acc-b")
+	writeAuthFile(t, homeA, tokenA, "acct-a")
+	writeAuthFile(t, homeB, tokenB, "acct-b")
+
+	var mu sync.Mutex
+	hits := []string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/codex/responses":
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			mu.Lock()
+			hits = append(hits, token)
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"ok":true}`)
+			return
+		case "/backend-api/wham/usage":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"rate_limit":{"primary_window":{"used_percent":50},"secondary_window":{"used_percent":50}}}`)
+			return
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+	}))
+	defer upstream.Close()
+
+	nowMS := time.Now().UnixMilli()
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Settings.Proxy.UpstreamBaseURL = upstream.URL + "/backend-api"
+		sf.Settings.Policy.Mode = PolicySticky
+		sf.Accounts = []Account{
+			{
+				ID:      "a",
+				Alias:   "a",
+				HomeDir: homeA,
+				BaseURL: sf.Settings.Proxy.UpstreamBaseURL,
+				Enabled: true,
+				Quota: QuotaState{
+					DailyLimit:   100,
+					DailyUsed:    90,
+					WeeklyLimit:  100,
+					WeeklyUsed:   90,
+					LastSyncAt:   nowMS,
+					Source:       "manual",
+					DailyResetAt: nowMS + 3600_000,
+				},
+			},
+			{
+				ID:      "b",
+				Alias:   "b",
+				HomeDir: homeB,
+				BaseURL: sf.Settings.Proxy.UpstreamBaseURL,
+				Enabled: true,
+				Quota: QuotaState{
+					DailyLimit:   100,
+					DailyUsed:    10,
+					WeeklyLimit:  100,
+					WeeklyUsed:   20,
+					LastSyncAt:   nowMS,
+					Source:       "manual",
+					DailyResetAt: nowMS + 3600_000,
+				},
+			},
+		}
+		sf.State.ActiveIndex = 0
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	if err := store.PersistSettingsToConfig(); err != nil {
+		t.Fatalf("PersistSettingsToConfig: %v", err)
+	}
+
+	proxySrv := httptest.NewServer(NewProxyServer(store, nil, nil))
+	defer proxySrv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	StartConfigReloader(ctx, store, nil, nil, 20*time.Millisecond)
+
+	resp1, err := http.Post(proxySrv.URL+"/responses", "application/json", bytes.NewBufferString(`{"input":"first"}`))
+	if err != nil {
+		t.Fatalf("first post to proxy: %v", err)
+	}
+	_ = resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("expected first request 200, got %d", resp1.StatusCode)
+	}
+
+	cfg := store.Snapshot().Settings
+	cfg.Policy.Mode = PolicyUsageBalanced
+	if err := WriteSettingsConfig(tmp, cfg); err != nil {
+		t.Fatalf("WriteSettingsConfig: %v", err)
+	}
+	if !waitFor(t, 2*time.Second, 20*time.Millisecond, func() bool {
+		return store.Snapshot().Settings.Policy.Mode == PolicyUsageBalanced
+	}) {
+		t.Fatalf("timed out waiting for policy reload")
+	}
+
+	resp2, err := http.Post(proxySrv.URL+"/responses", "application/json", bytes.NewBufferString(`{"input":"second"}`))
+	if err != nil {
+		t.Fatalf("second post to proxy: %v", err)
+	}
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected second request 200, got %d", resp2.StatusCode)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hits) < 2 {
+		t.Fatalf("expected at least 2 upstream hits, got %d", len(hits))
+	}
+	if hits[0] != tokenA {
+		t.Fatalf("expected sticky policy to use account a first, got token=%s", hits[0])
+	}
+	if hits[1] != tokenB {
+		t.Fatalf("expected usage_balanced policy to switch to account b, got token=%s", hits[1])
 	}
 }
 

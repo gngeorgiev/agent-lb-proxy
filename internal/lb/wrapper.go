@@ -118,27 +118,14 @@ func RemoveAccount(store *Store, alias string) error {
 }
 
 func RunCodex(store *Store, codexBin, proxyURL, codexHome string, args []string) (int, error) {
-	if codexBin == "" {
-		codexBin = "codex"
-	}
-	snapshot := store.Snapshot()
-	if proxyURL == "" {
-		proxyURL = "http://" + snapshot.Settings.Proxy.Listen
-	}
-	if codexHome == "" {
-		codexHome = store.RuntimeDir()
-	}
+	codexBin, args, codexHome, env := resolveCodexInvocation(store, codexBin, proxyURL, codexHome, args)
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		return 1, fmt.Errorf("create runtime CODEX_HOME: %w", err)
 	}
+	if err := seedRuntimeAuthIfMissing(store, codexHome); err != nil {
+		return 1, err
+	}
 
-	env := map[string]string{
-		"OPENAI_BASE_URL": proxyURL,
-		"CODEX_HOME":      codexHome,
-	}
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		env["OPENAI_API_KEY"] = "codex-lb-local-key"
-	}
 	cmd := exec.Command(codexBin, args...)
 	cmd.Env = withEnv(os.Environ(), env)
 	cmd.Stdin = os.Stdin
@@ -153,6 +140,118 @@ func RunCodex(store *Store, codexBin, proxyURL, codexHome string, args []string)
 		return exitErr.ExitCode(), nil
 	}
 	return 1, err
+}
+
+func FormatRunCodexCommand(store *Store, codexBin, proxyURL, codexHome string, args []string) string {
+	codexBin, args, _, env := resolveCodexInvocation(store, codexBin, proxyURL, codexHome, args)
+	return formatShellCommand(codexBin, args, env)
+}
+
+func resolveCodexInvocation(store *Store, codexBin, proxyURL, codexHome string, args []string) (string, []string, string, map[string]string) {
+	if codexBin == "" {
+		codexBin = "codex"
+	}
+	snapshot := store.Snapshot()
+	if proxyURL == "" {
+		proxyURL = "http://" + snapshot.Settings.Proxy.Listen
+	}
+	if codexHome == "" {
+		codexHome = store.RuntimeDir()
+	}
+
+	env := map[string]string{
+		"OPENAI_BASE_URL": proxyURL,
+		"CODEX_HOME":      codexHome,
+	}
+	if os.Getenv("OPENAI_API_KEY") == "" {
+		env["OPENAI_API_KEY"] = "codex-lb-local-key"
+	}
+	return codexBin, append([]string(nil), args...), codexHome, env
+}
+
+func seedRuntimeAuthIfMissing(store *Store, codexHome string) error {
+	targetAuth := filepath.Join(codexHome, "auth.json")
+	if _, err := os.Stat(targetAuth); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat runtime auth.json: %w", err)
+	}
+
+	snapshot := store.Snapshot()
+	if len(snapshot.Accounts) == 0 {
+		return nil
+	}
+
+	candidates := make([]int, 0, len(snapshot.Accounts))
+	if snapshot.State.ActiveIndex >= 0 && snapshot.State.ActiveIndex < len(snapshot.Accounts) {
+		candidates = append(candidates, snapshot.State.ActiveIndex)
+	}
+	for i := range snapshot.Accounts {
+		if i == snapshot.State.ActiveIndex {
+			continue
+		}
+		candidates = append(candidates, i)
+	}
+
+	for _, idx := range candidates {
+		home := snapshot.Accounts[idx].HomeDir
+		sourceAuth := filepath.Join(home, "auth.json")
+		if _, err := os.Stat(sourceAuth); err != nil {
+			continue
+		}
+		if err := copyFile(sourceAuth, targetAuth, 0o600); err != nil {
+			return fmt.Errorf("seed runtime auth.json from account %s: %w", snapshot.Accounts[idx].Alias, err)
+		}
+		sourceConfig := filepath.Join(home, "config.toml")
+		targetConfig := filepath.Join(codexHome, "config.toml")
+		if _, err := os.Stat(sourceConfig); err == nil {
+			_ = copyFile(sourceConfig, targetConfig, 0o600)
+		}
+		return nil
+	}
+	return nil
+}
+
+func formatShellCommand(bin string, args []string, env map[string]string) string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys)+1+len(args))
+	for _, key := range keys {
+		parts = append(parts, key+"="+shellQuote(env[key]))
+	}
+	parts = append(parts, shellQuote(bin))
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if isSafeShellWord(value) {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+func isSafeShellWord(value string) bool {
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case strings.ContainsRune("_-./:@%+=,", r):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func withEnv(base []string, updates map[string]string) []string {

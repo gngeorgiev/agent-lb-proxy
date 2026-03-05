@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/gngeorgiev/openai-codex-lb/internal/lb"
@@ -31,6 +34,8 @@ func run(argv []string) int {
 		return runProxy(argv[1:])
 	case "account":
 		return runAccount(argv[1:])
+	case "status":
+		return runStatus(argv[1:])
 	case "run":
 		return runCodex(argv[1:])
 	case "help", "-h", "--help":
@@ -130,7 +135,8 @@ Examples:
 	defer events.Close()
 
 	snapshot := store.Snapshot()
-	proxy := lb.NewProxyServer(store, log.New(os.Stderr, "codexlb: ", log.LstdFlags), events)
+	proxyLogger := log.New(os.Stderr, "codexlb: ", log.LstdFlags)
+	proxy := lb.NewProxyServer(store, proxyLogger, events)
 
 	srv := &http.Server{
 		Addr:              snapshot.Settings.Proxy.Listen,
@@ -152,6 +158,7 @@ Examples:
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	lb.StartConfigReloader(sigCtx, store, proxyLogger, events, time.Second)
 
 	select {
 	case <-sigCtx.Done():
@@ -353,6 +360,7 @@ func runCodex(argv []string) int {
 	proxyURL := fs.String("proxy-url", "", "Proxy URL (default: http://<listen-from-store>)")
 	codexBin := fs.String("codex-bin", os.Getenv("CODEXLB_CODEX_BIN"), "Codex executable path")
 	codexHome := fs.String("codex-home", "", "CODEX_HOME for wrapper-run command")
+	commandOnly := fs.Bool("command", false, "Print wrapped codex command and exit")
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), `Usage: codexlb run [flags] [<codex-args...>]
 
@@ -365,6 +373,7 @@ Flags:
 Examples:
   codexlb run
   codexlb run exec --json "fix this"
+  codexlb run --command exec --json "fix this"
   codexlb run --proxy-url http://127.0.0.1:9000 --codex-home ~/.codex-lb/runtime-work exec
 `)
 	}
@@ -377,6 +386,10 @@ Examples:
 		fmt.Fprintf(os.Stderr, "open store: %v\n", err)
 		return 1
 	}
+	if *commandOnly {
+		fmt.Println(lb.FormatRunCodexCommand(store, *codexBin, *proxyURL, *codexHome, fs.Args()))
+		return 0
+	}
 
 	code, err := lb.RunCodex(store, *codexBin, *proxyURL, *codexHome, fs.Args())
 	if err != nil {
@@ -384,6 +397,135 @@ Examples:
 		return 1
 	}
 	return code
+}
+
+func runStatus(argv []string) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	root := fs.String("root", "", "State directory")
+	proxyURL := fs.String("proxy-url", "", "Proxy URL (default: http://<listen-from-store>)")
+	timeout := fs.Duration("timeout", 3*time.Second, "HTTP timeout for status request")
+	jsonOut := fs.Bool("json", false, "Print raw JSON status output")
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), `Usage: codexlb status [flags]
+
+Queries the running proxy /status endpoint and prints account table.
+
+Flags:
+`)
+		fs.PrintDefaults()
+		fmt.Fprint(fs.Output(), `
+Examples:
+  codexlb status
+  codexlb status --proxy-url http://127.0.0.1:8765
+  codexlb status --json
+`)
+	}
+	if err := fs.Parse(argv); err != nil {
+		return parseFlagError(err)
+	}
+
+	store, err := lb.OpenStore(*root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+		return 1
+	}
+	snapshot := store.Snapshot()
+	url := *proxyURL
+	if strings.TrimSpace(url) == "" {
+		url = "http://" + snapshot.Settings.Proxy.Listen
+	}
+	url = strings.TrimRight(url, "/") + "/status"
+
+	client := &http.Client{Timeout: *timeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "query proxy status %s: %v\n", url, err)
+		return 1
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read proxy status response: %v\n", err)
+		return 1
+	}
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "proxy status error: status=%d body=%s\n", resp.StatusCode, strings.TrimSpace(string(body)))
+		return 1
+	}
+
+	if *jsonOut {
+		_, _ = os.Stdout.Write(body)
+		if len(body) == 0 || body[len(body)-1] != '\n' {
+			fmt.Println()
+		}
+		return 0
+	}
+
+	var status lb.ProxyStatus
+	if err := json.Unmarshal(body, &status); err != nil {
+		fmt.Fprintf(os.Stderr, "decode status JSON: %v\n", err)
+		return 1
+	}
+	printStatusTable(status)
+	return 0
+}
+
+func printStatusTable(status lb.ProxyStatus) {
+	fmt.Printf("policy=%s selected=%s reason=%s generated_at=%s\n", status.Policy.Mode, noneIfEmpty(status.SelectedAccountID), noneIfEmpty(status.SelectionReason), status.GeneratedAt)
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "ACTIVE\tPIN\tALIAS\tID\tEMAIL\tSTATUS\tDAILY_LEFT\tWEEKLY_LEFT\tSCORE\tLAST_SWITCH\tQUOTA")
+	for _, a := range status.Accounts {
+		active := ""
+		if a.Active {
+			active = "*"
+		}
+		pin := ""
+		if a.Pinned {
+			pin = "P"
+		}
+		state := "ready"
+		if !a.Enabled || a.DisabledReason != "" {
+			state = "disabled"
+			if a.DisabledReason != "" {
+				state += "(" + a.DisabledReason + ")"
+			}
+		} else if a.CooldownSeconds > 0 {
+			state = fmt.Sprintf("cooldown(%ds)", a.CooldownSeconds)
+		} else if !a.Healthy {
+			state = "unhealthy"
+		}
+
+		daily := "-"
+		if a.DailyLeftPct >= 0 {
+			daily = fmt.Sprintf("%.1f%%", a.DailyLeftPct)
+		}
+		weekly := "-"
+		if a.WeeklyLeftPct >= 0 {
+			weekly = fmt.Sprintf("%.1f%%", a.WeeklyLeftPct)
+		}
+		email := "-"
+		if a.Email != "" {
+			email = a.Email
+		}
+		lastSwitch := "-"
+		if a.LastSwitchReason != "" {
+			lastSwitch = a.LastSwitchReason
+		}
+		quota := "-"
+		if a.QuotaSource != "" {
+			quota = a.QuotaSource
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.3f\t%s\t%s\n",
+			active, pin, a.Alias, a.ID, email, state, daily, weekly, a.Score, lastSwitch, quota)
+	}
+	_ = w.Flush()
+}
+
+func noneIfEmpty(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "none"
+	}
+	return v
 }
 
 func parseFlagError(err error) int {
@@ -415,6 +557,7 @@ Usage:
 Commands:
   proxy    Run the local load-balancing proxy
   account  Manage enrolled accounts (login/import/list/rm)
+  status   Show runtime status table from running proxy
   run      Run codex with proxy endpoint environment wiring
 
 Run 'codexlb <command> --help' for detailed flags and examples.

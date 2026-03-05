@@ -3,6 +3,7 @@ package lb
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -65,6 +66,23 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/healthz" {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"ok":true}`)
+		p.logEvent("request.completed", map[string]any{
+			"req_id": reqID,
+			"status": http.StatusOK,
+			"path":   r.URL.Path,
+		})
+		return
+	}
+
+	if r.URL.Path == "/status" {
+		now := time.Now()
+		p.expireCooldowns(now)
+		p.maybeRefreshQuota(r.Context(), now)
+		snapshot := p.store.Snapshot()
+		status := BuildProxyStatus(snapshot, now)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(status)
 		p.logEvent("request.completed", map[string]any{
 			"req_id": reqID,
 			"status": http.StatusOK,

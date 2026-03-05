@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,6 +60,9 @@ func TestE2EWrapperLoginAndRun(t *testing.T) {
 	if !strings.Contains(logLine, "CODEX_HOME="+runtimeHome) {
 		t.Fatalf("missing CODEX_HOME override in log: %s", logLine)
 	}
+	if _, err := os.Stat(filepath.Join(runtimeHome, "auth.json")); err != nil {
+		t.Fatalf("expected runtime auth.json to be seeded: %v", err)
+	}
 }
 
 func TestE2EAccountImport(t *testing.T) {
@@ -82,6 +86,42 @@ func TestE2EAccountImport(t *testing.T) {
 	copied := filepath.Join(root, "accounts", "imported", "auth.json")
 	if _, err := os.Stat(copied); err != nil {
 		t.Fatalf("expected copied auth at %s: %v", copied, err)
+	}
+}
+
+func TestRunCommandOnlyPrintsWrappedCommand(t *testing.T) {
+	root := t.TempDir()
+	fakeLog := filepath.Join(root, "fake-codex.log")
+	fakeBin := filepath.Join(root, "codex")
+	writeFakeCodex(t, fakeBin)
+
+	t.Setenv("CODEXLB_CODEX_BIN", fakeBin)
+	t.Setenv("FAKE_LOG", fakeLog)
+	t.Setenv("OPENAI_API_KEY", "")
+
+	runtimeHome := filepath.Join(root, "runtime home")
+	out, code := captureStdout(func() int {
+		return run([]string{"run", "--root", root, "--proxy-url", "http://127.0.0.1:9876", "--codex-home", runtimeHome, "--command", "exec", "--json", "hello world"})
+	})
+	if code != 0 {
+		t.Fatalf("run --command failed: code=%d out=%s", code, out)
+	}
+	line := strings.TrimSpace(out)
+	if !strings.Contains(line, "OPENAI_BASE_URL=http://127.0.0.1:9876") {
+		t.Fatalf("expected OPENAI_BASE_URL in command: %s", line)
+	}
+	if !strings.Contains(line, "OPENAI_API_KEY=codex-lb-local-key") {
+		t.Fatalf("expected OPENAI_API_KEY default in command: %s", line)
+	}
+	if !strings.Contains(line, "CODEX_HOME='"+runtimeHome+"'") {
+		t.Fatalf("expected quoted CODEX_HOME in command: %s", line)
+	}
+	if !strings.Contains(line, "exec --json 'hello world'") {
+		t.Fatalf("expected quoted codex args in command: %s", line)
+	}
+
+	if _, err := os.Stat(fakeLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected codex binary not to execute, fake log exists: %v", err)
 	}
 }
 
