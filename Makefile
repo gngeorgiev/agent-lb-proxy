@@ -8,6 +8,7 @@ BINDIR ?= $(PREFIX)/bin
 DESTDIR ?=
 
 ROOT ?= $(HOME)/.codex-lb
+BINARY_WORKDIR ?= $(PWD)
 LISTEN ?= 127.0.0.1:8765
 UPSTREAM ?= https://chatgpt.com/backend-api
 
@@ -28,7 +29,7 @@ help:
 	@echo "  make install-systemd    Force install systemd --user unit"
 	@echo "  make install-launchd    Force install macOS launchd agent"
 	@echo ""
-	@echo "Config vars: ROOT=$(ROOT) LISTEN=$(LISTEN) UPSTREAM=$(UPSTREAM) PREFIX=$(PREFIX) BINDIR=$(BINDIR) DESTDIR=$(DESTDIR)"
+	@echo "Config vars: ROOT=$(ROOT) BINARY_WORKDIR=$(BINARY_WORKDIR) LISTEN=$(LISTEN) UPSTREAM=$(UPSTREAM) PREFIX=$(PREFIX) BINDIR=$(BINDIR) DESTDIR=$(DESTDIR)"
 
 build:
 	$(GO) build -o $(BINARY) $(CMD)
@@ -57,16 +58,16 @@ status: build
 	./$(BINARY) status --root "$(ROOT)" --proxy-url "http://$(LISTEN)"
 
 install-daemons: build
-	./scripts/install-daemon.sh --binary "$(PWD)/$(BINARY)" --root "$(ROOT)" --listen "$(LISTEN)" --upstream "$(UPSTREAM)"
+	./scripts/install-daemon.sh --binary "$(BINARY_WORKDIR)/$(BINARY)" --root "$(ROOT)"
 
 uninstall-daemons:
 	./scripts/uninstall-daemon.sh
 
 install-systemd: build
-	./scripts/install-daemon.sh --target systemd --binary "$(PWD)/$(BINARY)" --root "$(ROOT)" --listen "$(LISTEN)" --upstream "$(UPSTREAM)"
+	./scripts/install-daemon.sh --target systemd --binary "$(BINARY_WORKDIR)/$(BINARY)" --root "$(ROOT)"
 
 install-launchd: build
-	./scripts/install-daemon.sh --target launchd --binary "$(PWD)/$(BINARY)" --root "$(ROOT)" --listen "$(LISTEN)" --upstream "$(UPSTREAM)"
+	./scripts/install-daemon.sh --target launchd --binary "$(BINARY_WORKDIR)/$(BINARY)" --root "$(ROOT)"
 
 uninstall-systemd:
 	./scripts/uninstall-daemon.sh --target systemd

@@ -1,6 +1,7 @@
 package lb
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,6 +63,10 @@ cache_ttl_minutes = 8
 [commands]
 login = ["login", "--device-code"]
 run = ["exec", "--yolo"]
+
+[run]
+proxy_url = "http://127.0.0.1:19000"
+inherit_shell = false
 `
 	if err := os.WriteFile(filepath.Join(root, "config.toml"), []byte(custom), 0o600); err != nil {
 		t.Fatalf("write config.toml: %v", err)
@@ -89,5 +94,61 @@ run = ["exec", "--yolo"]
 	}
 	if len(snap.Settings.Commands.Run) != 2 || snap.Settings.Commands.Run[1] != "--yolo" {
 		t.Fatalf("commands.run not loaded: %#v", snap.Settings.Commands.Run)
+	}
+	if snap.Settings.Run.ProxyURL != "http://127.0.0.1:19000" {
+		t.Fatalf("run.proxy_url not loaded: %s", snap.Settings.Run.ProxyURL)
+	}
+	if snap.Settings.Run.InheritShell {
+		t.Fatalf("run.inherit_shell not loaded")
+	}
+}
+
+func TestOpenStoreDoesNotInheritMissingRunProxyURLFromStoreJSON(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+
+	legacy := map[string]any{
+		"version":    1,
+		"updated_at": "2026-01-01T00:00:00Z",
+		"settings": map[string]any{
+			"run": map[string]any{
+				"proxy_url": "codexlb.internal",
+			},
+		},
+		"state": map[string]any{
+			"active_index": 0,
+		},
+		"accounts": []any{},
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy store: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "store.json"), append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write store.json: %v", err)
+	}
+
+	config := `
+[proxy]
+listen = "127.0.0.1:8765"
+`
+	if err := os.WriteFile(filepath.Join(root, "config.toml"), []byte(config), 0o600); err != nil {
+		t.Fatalf("write config.toml: %v", err)
+	}
+
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	if got := store.Snapshot().Settings.Run.ProxyURL; got != "" {
+		t.Fatalf("expected run.proxy_url to come from config/defaults, got %q", got)
+	}
+	if !store.Snapshot().Settings.Run.InheritShell {
+		t.Fatalf("expected default run.inherit_shell=true")
 	}
 }

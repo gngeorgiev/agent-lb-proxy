@@ -122,7 +122,7 @@ func RemoveAccount(store *Store, alias string) error {
 }
 
 func RunCodex(store *Store, codexBin, proxyURL, codexHome string, args []string) (int, error) {
-	codexBin, args, codexHome, env := resolveCodexInvocation(store, codexBin, proxyURL, codexHome, args)
+	codexBin, args, codexHome, env, inheritShell := resolveCodexInvocation(store, codexBin, proxyURL, codexHome, args)
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		return 1, fmt.Errorf("create runtime CODEX_HOME: %w", err)
 	}
@@ -131,6 +131,14 @@ func RunCodex(store *Store, codexBin, proxyURL, codexHome string, args []string)
 	}
 
 	cmd := exec.Command(codexBin, args...)
+	if inheritShell {
+		shell := strings.TrimSpace(os.Getenv("SHELL"))
+		if shell == "" {
+			shell = "/bin/sh"
+		}
+		shellCmd := formatShellCommand(codexBin, args, nil)
+		cmd = exec.Command(shell, "-lc", shellCmd)
+	}
 	cmd.Env = withEnv(os.Environ(), env)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -147,17 +155,21 @@ func RunCodex(store *Store, codexBin, proxyURL, codexHome string, args []string)
 }
 
 func FormatRunCodexCommand(store *Store, codexBin, proxyURL, codexHome string, args []string) string {
-	codexBin, args, _, env := resolveCodexInvocation(store, codexBin, proxyURL, codexHome, args)
+	codexBin, args, _, env, _ := resolveCodexInvocation(store, codexBin, proxyURL, codexHome, args)
 	return formatShellCommand(codexBin, args, env)
 }
 
-func resolveCodexInvocation(store *Store, codexBin, proxyURL, codexHome string, args []string) (string, []string, string, map[string]string) {
+func resolveCodexInvocation(store *Store, codexBin, proxyURL, codexHome string, args []string) (string, []string, string, map[string]string, bool) {
 	if codexBin == "" {
 		codexBin = "codex"
 	}
 	snapshot := store.Snapshot()
 	if proxyURL == "" {
-		proxyURL = "http://" + snapshot.Settings.Proxy.Listen
+		if snapshot.Settings.Run.ProxyURL != "" {
+			proxyURL = snapshot.Settings.Run.ProxyURL
+		} else {
+			proxyURL = "http://" + snapshot.Settings.Proxy.Listen
+		}
 	}
 	if codexHome == "" {
 		codexHome = store.RuntimeDir()
@@ -174,7 +186,7 @@ func resolveCodexInvocation(store *Store, codexBin, proxyURL, codexHome string, 
 	if os.Getenv("OPENAI_API_KEY") == "" {
 		env["OPENAI_API_KEY"] = "codex-lb-local-key"
 	}
-	return codexBin, fullArgs, codexHome, env
+	return codexBin, fullArgs, codexHome, env, snapshot.Settings.Run.InheritShell
 }
 
 func seedRuntimeAuthIfMissing(store *Store, codexHome string) error {

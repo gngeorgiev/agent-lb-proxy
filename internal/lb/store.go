@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,8 +16,20 @@ type Store struct {
 	root string
 	path string
 
-	mu   sync.Mutex
-	data StoreFile
+	mu                sync.Mutex
+	data              StoreFile
+	runtimeOverrides  RuntimeSettingsOverrides
+}
+
+type RuntimeSettingsOverrides struct {
+	Listen                 *string
+	UpstreamBaseURL        *string
+	MaxAttempts            *int
+	UsageTimeoutMS         *int
+	CooldownDefaultSeconds *int
+	RefreshIntervalMinutes *int
+	RefreshIntervalMessages *int
+	CacheTTLMinutes        *int
 }
 
 type SettingsReloadSummary struct {
@@ -76,7 +89,15 @@ func (s *Store) RuntimeDir() string {
 func (s *Store) Snapshot() StoreFile {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cloneStore(s.data)
+	out := cloneStore(s.data)
+	applyRuntimeOverrides(&out, s.runtimeOverrides)
+	return out
+}
+
+func (s *Store) SetRuntimeSettingsOverrides(overrides RuntimeSettingsOverrides) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runtimeOverrides = overrides
 }
 
 func (s *Store) Update(fn func(*StoreFile) error) error {
@@ -86,7 +107,7 @@ func (s *Store) Update(fn func(*StoreFile) error) error {
 		return err
 	}
 	s.data.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return writeJSONAtomic(s.path, s.data)
+	return writeJSONAtomic(s.path, storeFileForPersistence(s.data))
 }
 
 func (s *Store) loadOrInit() error {
@@ -105,13 +126,24 @@ func (s *Store) loadOrInit() error {
 		s.data = mergeDefaults(sf)
 	}
 
-	settings, err := loadOrCreateSettingsConfig(s.root, s.data.Settings)
+	prev := s.data.Settings
+	settings, err := loadOrCreateSettingsConfig(s.root)
 	if err != nil {
 		return err
 	}
+	if settings.Proxy.UpstreamBaseURL != prev.Proxy.UpstreamBaseURL {
+		for i := range s.data.Accounts {
+			if s.data.Accounts[i].BaseURL == "" || s.data.Accounts[i].BaseURL == prev.Proxy.UpstreamBaseURL {
+				s.data.Accounts[i].BaseURL = settings.Proxy.UpstreamBaseURL
+			}
+		}
+	}
 	s.data.Settings = settings
+	if err := s.reconcileAccountsFromDisk(); err != nil {
+		return err
+	}
 
-	return writeJSONAtomic(s.path, s.data)
+	return writeJSONAtomic(s.path, storeFileForPersistence(s.data))
 }
 
 func (s *Store) PersistSettingsToConfig() error {
@@ -124,7 +156,7 @@ func (s *Store) ReloadSettingsFromConfig() (SettingsReloadSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev := s.data.Settings
-	settings, err := loadOrCreateSettingsConfig(s.root, prev)
+	settings, err := loadOrCreateSettingsConfig(s.root)
 	if err != nil {
 		return SettingsReloadSummary{}, err
 	}
@@ -155,7 +187,7 @@ func (s *Store) ReloadSettingsFromConfig() (SettingsReloadSummary, error) {
 	if !summary.Changed {
 		return summary, nil
 	}
-	return summary, writeJSONAtomic(s.path, s.data)
+	return summary, writeJSONAtomic(s.path, storeFileForPersistence(s.data))
 }
 
 func writeJSONAtomic(path string, v any) error {
@@ -184,7 +216,7 @@ func cloneStore(in StoreFile) StoreFile {
 }
 
 func settingsEqual(a, b Settings) bool {
-	if a.Proxy != b.Proxy || a.Policy != b.Policy || a.Quota != b.Quota {
+	if a.Proxy != b.Proxy || a.Policy != b.Policy || a.Quota != b.Quota || a.Run != b.Run {
 		return false
 	}
 	if !slices.Equal(a.Commands.Login, b.Commands.Login) {
@@ -241,4 +273,142 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func applyRuntimeOverrides(sf *StoreFile, overrides RuntimeSettingsOverrides) {
+	if overrides.Listen != nil {
+		sf.Settings.Proxy.Listen = *overrides.Listen
+	}
+	if overrides.UpstreamBaseURL != nil {
+		prevUpstream := sf.Settings.Proxy.UpstreamBaseURL
+		sf.Settings.Proxy.UpstreamBaseURL = *overrides.UpstreamBaseURL
+		for i := range sf.Accounts {
+			if sf.Accounts[i].BaseURL == "" || sf.Accounts[i].BaseURL == prevUpstream {
+				sf.Accounts[i].BaseURL = sf.Settings.Proxy.UpstreamBaseURL
+			}
+		}
+	}
+	if overrides.MaxAttempts != nil {
+		sf.Settings.Proxy.MaxAttempts = *overrides.MaxAttempts
+	}
+	if overrides.UsageTimeoutMS != nil {
+		sf.Settings.Proxy.UsageTimeoutMS = *overrides.UsageTimeoutMS
+	}
+	if overrides.CooldownDefaultSeconds != nil {
+		sf.Settings.Proxy.CooldownDefaultS = *overrides.CooldownDefaultSeconds
+	}
+	if overrides.RefreshIntervalMinutes != nil {
+		sf.Settings.Quota.RefreshIntervalMinutes = *overrides.RefreshIntervalMinutes
+	}
+	if overrides.RefreshIntervalMessages != nil {
+		sf.Settings.Quota.RefreshIntervalMessages = *overrides.RefreshIntervalMessages
+	}
+	if overrides.CacheTTLMinutes != nil {
+		sf.Settings.Quota.CacheTTLMinutes = *overrides.CacheTTLMinutes
+	}
+}
+
+func storeFileForPersistence(in StoreFile) StoreFile {
+	out := cloneStore(in)
+	out.Settings = Settings{}
+	return out
+}
+
+func (s *Store) reconcileAccountsFromDisk() error {
+	entries, err := os.ReadDir(s.AccountsDir())
+	if err != nil {
+		return fmt.Errorf("read accounts dir: %w", err)
+	}
+
+	existingByAlias := make(map[string]Account, len(s.data.Accounts))
+	existingByID := make(map[string]Account, len(s.data.Accounts))
+	for _, account := range s.data.Accounts {
+		existingByAlias[account.Alias] = account
+		existingByID[account.ID] = account
+	}
+
+	base := s.data.Settings.Proxy.UpstreamBaseURL
+	if base == "" {
+		base = "https://chatgpt.com/backend-api"
+	}
+
+	discovered := make(map[string]Account)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		alias := entry.Name()
+		if err := ValidateAlias(alias); err != nil {
+			continue
+		}
+
+		home := filepath.Join(s.AccountsDir(), alias)
+		auth, err := LoadAuth(home)
+		if err != nil {
+			continue
+		}
+
+		id := fmt.Sprintf("openai:%s", strings.ToLower(alias))
+		account, ok := existingByAlias[alias]
+		if !ok {
+			account, ok = existingByID[id]
+		}
+		if !ok {
+			account = Account{
+				ID:             id,
+				Alias:          alias,
+				HomeDir:        home,
+				BaseURL:        base,
+				Enabled:        true,
+				DisabledReason: "",
+			}
+		}
+		account.ID = id
+		account.Alias = alias
+		account.HomeDir = home
+		if account.BaseURL == "" {
+			account.BaseURL = base
+		}
+		account.ChatGPTAccountID = auth.ChatGPTAccountID
+		account.UserEmail = auth.UserEmail
+		discovered[alias] = account
+	}
+
+	// Preserve existing order for still-present accounts, then append new ones by alias.
+	reconciled := make([]Account, 0, len(discovered))
+	for _, existing := range s.data.Accounts {
+		account, ok := discovered[existing.Alias]
+		if !ok {
+			continue
+		}
+		reconciled = append(reconciled, account)
+		delete(discovered, existing.Alias)
+	}
+	newAliases := make([]string, 0, len(discovered))
+	for alias := range discovered {
+		newAliases = append(newAliases, alias)
+	}
+	slices.Sort(newAliases)
+	for _, alias := range newAliases {
+		reconciled = append(reconciled, discovered[alias])
+	}
+
+	s.data.Accounts = reconciled
+	if s.data.State.ActiveIndex >= len(s.data.Accounts) {
+		s.data.State.ActiveIndex = max(0, len(s.data.Accounts)-1)
+	}
+	if s.data.State.PinnedAccountID != "" {
+		found := false
+		for _, account := range s.data.Accounts {
+			if account.ID == s.data.State.PinnedAccountID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.data.State.PinnedAccountID = ""
+		}
+	}
+
+	return nil
 }

@@ -84,47 +84,34 @@ Examples:
 		return 1
 	}
 
+	overrides := lb.RuntimeSettingsOverrides{}
 	if *listen != "" || *upstream != "" || *maxAttempts > 0 || *usageTimeoutMS > 0 || *cooldownDefaultSeconds > 0 || *quotaRefreshMinutes > 0 || *quotaRefreshMessages > 0 || *quotaCacheTTLMinutes > 0 {
-		err = store.Update(func(sf *lb.StoreFile) error {
-			if *listen != "" {
-				sf.Settings.Proxy.Listen = *listen
-			}
-			if *upstream != "" {
-				sf.Settings.Proxy.UpstreamBaseURL = strings.TrimRight(*upstream, "/")
-			}
-			if *maxAttempts > 0 {
-				sf.Settings.Proxy.MaxAttempts = *maxAttempts
-			}
-			if *usageTimeoutMS > 0 {
-				sf.Settings.Proxy.UsageTimeoutMS = *usageTimeoutMS
-			}
-			if *cooldownDefaultSeconds > 0 {
-				sf.Settings.Proxy.CooldownDefaultS = *cooldownDefaultSeconds
-			}
-			if *quotaRefreshMinutes > 0 {
-				sf.Settings.Quota.RefreshIntervalMinutes = *quotaRefreshMinutes
-			}
-			if *quotaRefreshMessages > 0 {
-				sf.Settings.Quota.RefreshIntervalMessages = *quotaRefreshMessages
-			}
-			if *quotaCacheTTLMinutes > 0 {
-				sf.Settings.Quota.CacheTTLMinutes = *quotaCacheTTLMinutes
-			}
-			for i := range sf.Accounts {
-				if sf.Accounts[i].BaseURL == "" {
-					sf.Accounts[i].BaseURL = sf.Settings.Proxy.UpstreamBaseURL
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "update settings: %v\n", err)
-			return 1
+		if *listen != "" {
+			overrides.Listen = listen
 		}
-		if err := store.PersistSettingsToConfig(); err != nil {
-			fmt.Fprintf(os.Stderr, "persist config.toml: %v\n", err)
-			return 1
+		if *upstream != "" {
+			val := strings.TrimRight(*upstream, "/")
+			overrides.UpstreamBaseURL = &val
 		}
+		if *maxAttempts > 0 {
+			overrides.MaxAttempts = maxAttempts
+		}
+		if *usageTimeoutMS > 0 {
+			overrides.UsageTimeoutMS = usageTimeoutMS
+		}
+		if *cooldownDefaultSeconds > 0 {
+			overrides.CooldownDefaultSeconds = cooldownDefaultSeconds
+		}
+		if *quotaRefreshMinutes > 0 {
+			overrides.RefreshIntervalMinutes = quotaRefreshMinutes
+		}
+		if *quotaRefreshMessages > 0 {
+			overrides.RefreshIntervalMessages = quotaRefreshMessages
+		}
+		if *quotaCacheTTLMinutes > 0 {
+			overrides.CacheTTLMinutes = quotaCacheTTLMinutes
+		}
+		store.SetRuntimeSettingsOverrides(overrides)
 	}
 
 	events, err := lb.OpenEventLogger(store.RootDir())
@@ -357,7 +344,7 @@ Flags:
 func runCodex(argv []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	root := fs.String("root", "", "State directory")
-	proxyURL := fs.String("proxy-url", "", "Proxy URL (default: http://<listen-from-store>)")
+	proxyURL := fs.String("proxy-url", "", "Proxy URL (default: run.proxy_url or http://<listen-from-store>)")
 	codexBin := fs.String("codex-bin", os.Getenv("CODEXLB_CODEX_BIN"), "Codex executable path")
 	codexHome := fs.String("codex-home", "", "CODEX_HOME for wrapper-run command")
 	commandOnly := fs.Bool("command", false, "Print wrapped codex command and exit")

@@ -4,8 +4,8 @@ set -euo pipefail
 TARGET="auto"
 BINARY=""
 ROOT_DIR="${HOME}/.codex-lb"
-LISTEN="127.0.0.1:8765"
-UPSTREAM="https://chatgpt.com/backend-api"
+LISTEN=""
+UPSTREAM=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -73,6 +73,13 @@ if [[ "$TARGET" == "systemd" ]]; then
   UNIT_DIR="${HOME}/.config/systemd/user"
   UNIT_PATH="${UNIT_DIR}/codexlb-proxy.service"
   mkdir -p "$UNIT_DIR"
+  EXEC_START="${BINARY} proxy --root ${ROOT_DIR}"
+  if [[ -n "$LISTEN" ]]; then
+    EXEC_START="${EXEC_START} --listen ${LISTEN}"
+  fi
+  if [[ -n "$UPSTREAM" ]]; then
+    EXEC_START="${EXEC_START} --upstream ${UPSTREAM}"
+  fi
   cat > "$UNIT_PATH" <<EOF_UNIT
 [Unit]
 Description=codexlb proxy
@@ -80,7 +87,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${BINARY} proxy --root ${ROOT_DIR} --listen ${LISTEN} --upstream ${UPSTREAM}
+ExecStart=${EXEC_START}
 Restart=always
 RestartSec=2
 Environment=HOME=${HOME}
@@ -100,6 +107,22 @@ if [[ "$TARGET" == "launchd" ]]; then
   AGENT_DIR="${HOME}/Library/LaunchAgents"
   PLIST_PATH="${AGENT_DIR}/com.codexlb.proxy.plist"
   mkdir -p "$AGENT_DIR"
+  LISTEN_ARGS_PLIST=""
+  if [[ -n "$LISTEN" ]]; then
+    LISTEN_ARGS_PLIST=$(cat <<EOF_LISTEN
+    <string>--listen</string>
+    <string>${LISTEN}</string>
+EOF_LISTEN
+)
+  fi
+  UPSTREAM_ARGS_PLIST=""
+  if [[ -n "$UPSTREAM" ]]; then
+    UPSTREAM_ARGS_PLIST=$(cat <<EOF_UPSTREAM
+    <string>--upstream</string>
+    <string>${UPSTREAM}</string>
+EOF_UPSTREAM
+)
+  fi
   cat > "$PLIST_PATH" <<EOF_PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -113,10 +136,8 @@ if [[ "$TARGET" == "launchd" ]]; then
     <string>proxy</string>
     <string>--root</string>
     <string>${ROOT_DIR}</string>
-    <string>--listen</string>
-    <string>${LISTEN}</string>
-    <string>--upstream</string>
-    <string>${UPSTREAM}</string>
+${LISTEN_ARGS_PLIST}
+${UPSTREAM_ARGS_PLIST}
   </array>
   <key>RunAtLoad</key>
   <true/>

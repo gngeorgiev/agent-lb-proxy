@@ -74,7 +74,7 @@ Default root is `~/.codex-lb`.
 
 | Path | Purpose |
 |---|---|
-| `~/.codex-lb/store.json` | Runtime state (accounts, quotas, active account, settings snapshot) |
+| `~/.codex-lb/store.json` | Runtime state (accounts, quotas, active account) |
 | `~/.codex-lb/config.toml` | Tunable settings |
 | `~/.codex-lb/accounts/<alias>/auth.json` | Per-account auth |
 | `~/.codex-lb/runtime/` | Wrapper runtime `CODEX_HOME` |
@@ -85,6 +85,7 @@ Default root is `~/.codex-lb`.
 ## Configuration (`config.toml`)
 
 `codexlb` creates `~/.codex-lb/config.toml` on first run.
+This file is the source of truth for settings.
 
 ```toml
 [proxy]
@@ -114,13 +115,20 @@ login = ["login"]
 # Prefix prepended to args passed to `codexlb run`.
 # Example: run Codex in yolo mode by default.
 run = ["exec", "--yolo"]
+
+[run]
+# Default URL used by `codexlb run` when --proxy-url is not provided.
+# If empty, falls back to "http://<proxy.listen>".
+proxy_url = ""
+# Run codex via the current shell (`$SHELL -lc ...`).
+inherit_shell = true
 ```
 
 Hot reload behavior:
 
 - Proxy polls `config.toml` and reloads updates automatically (default: every 1s)
 - `proxy.listen` changes are detected but require proxy restart to take effect
-- CLI flags on `codexlb proxy` override settings for that run and are persisted back to `config.toml`
+- CLI flags on `codexlb proxy` override settings for that process only (not persisted)
 
 ## Account Selection Algorithm
 
@@ -254,7 +262,7 @@ Flags:
 | Flag | Description |
 |---|---|
 | `--root` | State directory |
-| `--proxy-url` | Override proxy URL (default `http://<listen-from-store>`) |
+| `--proxy-url` | Override proxy URL (default `run.proxy_url`, else `http://<listen-from-store>`) |
 | `--codex-bin` | Codex executable path |
 | `--codex-home` | Wrapper runtime `CODEX_HOME` |
 | `--command` | Print wrapped command and exit (do not execute) |
@@ -264,6 +272,7 @@ Runtime env behavior:
 - Sets `OPENAI_BASE_URL` to proxy URL
 - Sets `OPENAI_API_KEY=codex-lb-local-key` if missing
 - Uses `CODEX_HOME` from `--codex-home` or `~/.codex-lb/runtime`
+- Runs through `$SHELL -lc` when `run.inherit_shell = true` (default)
 - If runtime `auth.json` is missing, seeds it from an enrolled account
 - Prepends `commands.run` to passed args
 
@@ -323,6 +332,7 @@ make install-launchd
 Configurable variables:
 
 - `ROOT` (default `~/.codex-lb`)
+- `BINARY_WORKDIR` (directory containing the daemon binary, default current repo dir)
 - `LISTEN` (default `127.0.0.1:8765`)
 - `UPSTREAM` (default `https://chatgpt.com/backend-api`)
 - `PREFIX` (default `/usr/local`)
@@ -337,6 +347,15 @@ Configurable variables:
 make install-systemd
 systemctl --user status codexlb-proxy.service
 ```
+
+Use a binary from a separate workdir:
+
+```bash
+make install-systemd BINARY_WORKDIR=/path/to/workdir
+```
+
+The installed daemon runs `codexlb proxy --root <ROOT>` and reads listen/upstream from
+`config.toml`, so service restarts do not overwrite runtime config values.
 
 Unit path: `~/.config/systemd/user/codexlb-proxy.service`
 

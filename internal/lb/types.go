@@ -43,11 +43,17 @@ type CommandConfig struct {
 	Run   []string `json:"run"`
 }
 
+type RunConfig struct {
+	ProxyURL     string `json:"proxy_url"`
+	InheritShell bool   `json:"inherit_shell"`
+}
+
 type Settings struct {
 	Proxy    ProxyConfig   `json:"proxy"`
 	Policy   PolicyConfig  `json:"policy"`
 	Quota    QuotaConfig   `json:"quota"`
 	Commands CommandConfig `json:"commands"`
+	Run      RunConfig     `json:"run"`
 }
 
 type QuotaState struct {
@@ -87,7 +93,7 @@ type RuntimeState struct {
 type StoreFile struct {
 	Version   int          `json:"version"`
 	UpdatedAt string       `json:"updated_at"`
-	Settings  Settings     `json:"settings"`
+	Settings  Settings     `json:"settings,omitempty"`
 	State     RuntimeState `json:"state"`
 	Accounts  []Account    `json:"accounts"`
 }
@@ -120,6 +126,10 @@ func defaultStore() StoreFile {
 			Commands: CommandConfig{
 				Login: []string{"login"},
 				Run:   []string{},
+			},
+			Run: RunConfig{
+				ProxyURL:     "",
+				InheritShell: true,
 			},
 		},
 		State:    RuntimeState{ActiveIndex: 0},
@@ -187,6 +197,7 @@ func mergeDefaults(in StoreFile) StoreFile {
 		}
 	}
 	out.Settings.Commands.Run = sanitizeCommand(out.Settings.Commands.Run)
+	out.Settings.Run.ProxyURL = strings.TrimSpace(out.Settings.Run.ProxyURL)
 
 	for i := range out.Accounts {
 		if out.Accounts[i].BaseURL == "" {

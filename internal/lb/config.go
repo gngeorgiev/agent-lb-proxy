@@ -14,6 +14,7 @@ type configFile struct {
 	Policy   configPolicy   `toml:"policy"`
 	Quota    configQuota    `toml:"quota"`
 	Commands configCommands `toml:"commands"`
+	Run      configRun      `toml:"run"`
 }
 
 type configProxy struct {
@@ -46,11 +47,17 @@ type configCommands struct {
 	Run   []string `toml:"run"`
 }
 
+type configRun struct {
+	ProxyURL     string `toml:"proxy_url"`
+	InheritShell bool   `toml:"inherit_shell"`
+}
+
 type partialConfigFile struct {
 	Proxy    *partialConfigProxy    `toml:"proxy"`
 	Policy   *partialConfigPolicy   `toml:"policy"`
 	Quota    *partialConfigQuota    `toml:"quota"`
 	Commands *partialConfigCommands `toml:"commands"`
+	Run      *partialConfigRun      `toml:"run"`
 }
 
 type partialConfigProxy struct {
@@ -83,11 +90,17 @@ type partialConfigCommands struct {
 	Run   *[]string `toml:"run"`
 }
 
+type partialConfigRun struct {
+	ProxyURL     *string `toml:"proxy_url"`
+	InheritShell *bool   `toml:"inherit_shell"`
+}
+
 func ConfigPath(root string) string {
 	return filepath.Join(root, "config.toml")
 }
 
-func loadOrCreateSettingsConfig(root string, fallback Settings) (Settings, error) {
+func loadOrCreateSettingsConfig(root string) (Settings, error) {
+	fallback := defaultStore().Settings
 	path := ConfigPath(root)
 	bytes, err := os.ReadFile(path)
 	if err != nil {
@@ -161,6 +174,14 @@ func loadOrCreateSettingsConfig(root string, fallback Settings) (Settings, error
 			out.Commands.Run = sanitizeCommand(*partial.Commands.Run)
 		}
 	}
+	if partial.Run != nil {
+		if partial.Run.ProxyURL != nil {
+			out.Run.ProxyURL = strings.TrimSpace(*partial.Run.ProxyURL)
+		}
+		if partial.Run.InheritShell != nil {
+			out.Run.InheritShell = *partial.Run.InheritShell
+		}
+	}
 
 	// Keep merged settings normalized with defaults/ranges.
 	tmp := defaultStore()
@@ -210,6 +231,10 @@ func settingsToConfig(settings Settings) configFile {
 		Commands: configCommands{
 			Login: append([]string(nil), settings.Commands.Login...),
 			Run:   append([]string(nil), settings.Commands.Run...),
+		},
+		Run: configRun{
+			ProxyURL:     settings.Run.ProxyURL,
+			InheritShell: settings.Run.InheritShell,
 		},
 	}
 }
