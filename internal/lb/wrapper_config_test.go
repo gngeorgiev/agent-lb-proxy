@@ -2,6 +2,8 @@ package lb
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,7 +56,7 @@ func TestSeedRuntimeAuthIfMissingCreatesProxyOnlyAuthWithoutAccounts(t *testing.
 	if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
 		t.Fatalf("mkdir runtime home: %v", err)
 	}
-	if err := seedRuntimeAuthIfMissing(store, runtimeHome); err != nil {
+	if err := seedRuntimeAuthIfMissing(store, runtimeHome, ""); err != nil {
 		t.Fatalf("seedRuntimeAuthIfMissing: %v", err)
 	}
 
@@ -70,6 +72,19 @@ func TestSeedRuntimeAuthIfMissingCreatesProxyOnlyAuthWithoutAccounts(t *testing.
 	}
 	if auth.ChatGPTAccountID != "proxy-only" {
 		t.Fatalf("expected proxy-only account id, got %q", auth.ChatGPTAccountID)
+	}
+	raw, err := os.ReadFile(filepath.Join(runtimeHome, "auth.json"))
+	if err != nil {
+		t.Fatalf("read runtime auth.json: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal runtime auth: %v", err)
+	}
+	tokens, _ := parsed["tokens"].(map[string]any)
+	idToken, _ := tokens["id_token"].(string)
+	if idToken == "" {
+		t.Fatalf("expected proxy-only id_token in runtime auth")
 	}
 }
 
@@ -90,7 +105,7 @@ func TestSeedRuntimeAuthIfMissingRepairsInvalidRuntimeAuth(t *testing.T) {
 		t.Fatalf("write invalid runtime auth: %v", err)
 	}
 
-	if err := seedRuntimeAuthIfMissing(store, runtimeHome); err != nil {
+	if err := seedRuntimeAuthIfMissing(store, runtimeHome, ""); err != nil {
 		t.Fatalf("seedRuntimeAuthIfMissing: %v", err)
 	}
 	auth, err := LoadAuth(runtimeHome)
@@ -140,7 +155,7 @@ func TestSeedRuntimeAuthIfMissingRefreshesExistingRuntimeAuthFromSelectedAccount
 	}
 	writeAuthForTest(t, runtimeHome, "acct-a", "a@example.com")
 
-	if err := seedRuntimeAuthIfMissing(store, runtimeHome); err != nil {
+	if err := seedRuntimeAuthIfMissing(store, runtimeHome, ""); err != nil {
 		t.Fatalf("seedRuntimeAuthIfMissing: %v", err)
 	}
 	auth, err := LoadAuth(runtimeHome)
@@ -149,6 +164,42 @@ func TestSeedRuntimeAuthIfMissingRefreshesExistingRuntimeAuthFromSelectedAccount
 	}
 	if auth.ChatGPTAccountID != "acct-b" {
 		t.Fatalf("expected refreshed runtime account acct-b, got %q", auth.ChatGPTAccountID)
+	}
+}
+
+func TestSeedRuntimeAuthIfMissingFetchesFromRemoteProxy(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/admin/runtime-auth" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(AdminRuntimeAuthResponse{
+			Auth: json.RawMessage(`{"tokens":{"access_token":"remote-access","id_token":"remote-id","account_id":"acct-remote"}}`),
+		})
+	}))
+	defer server.Close()
+
+	runtimeHome := filepath.Join(root, "runtime-remote")
+	if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
+		t.Fatalf("mkdir runtime home: %v", err)
+	}
+	if err := seedRuntimeAuthIfMissing(store, runtimeHome, server.URL); err != nil {
+		t.Fatalf("seedRuntimeAuthIfMissing: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(runtimeHome, "auth.json"))
+	if err != nil {
+		t.Fatalf("read runtime auth.json: %v", err)
+	}
+	if string(raw) != `{"tokens":{"access_token":"remote-access","id_token":"remote-id","account_id":"acct-remote"}}` {
+		t.Fatalf("unexpected runtime auth payload: %s", string(raw))
 	}
 }
 

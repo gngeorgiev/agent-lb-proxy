@@ -42,6 +42,15 @@ func TestProxyAdminImportListPinUnpinRemove(t *testing.T) {
 		t.Fatalf("unexpected admin account list: %+v", listResp.Accounts)
 	}
 
+	var runtimeAuthResp AdminRuntimeAuthResponse
+	callAdminJSON(t, http.MethodGet, srv.URL+"/admin/runtime-auth", nil, &runtimeAuthResp)
+	if !json.Valid(runtimeAuthResp.Auth) {
+		t.Fatalf("expected valid runtime auth payload, got: %s", string(runtimeAuthResp.Auth))
+	}
+	if runtimeAuthResp.SourceAlias != "alice" {
+		t.Fatalf("expected source alias alice, got %q", runtimeAuthResp.SourceAlias)
+	}
+
 	callAdminJSON(t, http.MethodPost, srv.URL+"/admin/account/pin", AdminAliasRequest{Alias: "alice"}, nil)
 	if got := store.Snapshot().State.PinnedAccountID; got != "openai:alice" {
 		t.Fatalf("expected pinned id openai:alice, got %q", got)

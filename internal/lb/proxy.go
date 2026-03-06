@@ -142,6 +142,32 @@ func (p *ProxyServer) handleAdmin(w http.ResponseWriter, r *http.Request) int {
 		snapshot := p.store.Snapshot()
 		writeJSON(w, http.StatusOK, AdminAccountsResponse{Accounts: snapshot.Accounts})
 		return http.StatusOK
+	case r.Method == http.MethodGet && r.URL.Path == "/admin/runtime-auth":
+		snapshot := p.store.Snapshot()
+		sel, err := selectAccount(&snapshot, time.Now().UnixMilli())
+		if err != nil {
+			writeJSONError(w, http.StatusNotFound, "no available account for runtime auth")
+			return http.StatusNotFound
+		}
+		if sel.Index < 0 || sel.Index >= len(snapshot.Accounts) {
+			writeJSONError(w, http.StatusInternalServerError, "selected account index is out of range")
+			return http.StatusInternalServerError
+		}
+		account := snapshot.Accounts[sel.Index]
+		rawAuth, err := os.ReadFile(filepath.Join(account.HomeDir, "auth.json"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("read auth for %s: %v", account.Alias, err))
+			return http.StatusBadRequest
+		}
+		if !json.Valid(rawAuth) {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid auth.json for %s", account.Alias))
+			return http.StatusBadRequest
+		}
+		writeJSON(w, http.StatusOK, AdminRuntimeAuthResponse{
+			Auth:        json.RawMessage(rawAuth),
+			SourceAlias: account.Alias,
+		})
+		return http.StatusOK
 	case r.Method == http.MethodPost && r.URL.Path == "/admin/account/login":
 		var req AdminLoginRequest
 		if err := decodeJSONBody(r, &req); err != nil {

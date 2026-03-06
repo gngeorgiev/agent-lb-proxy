@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -129,7 +130,7 @@ func RunCodex(store *Store, codexBin, proxyURL, codexHome string, args []string)
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		return 1, fmt.Errorf("create runtime CODEX_HOME: %w", err)
 	}
-	if err := seedRuntimeAuthIfMissing(store, codexHome); err != nil {
+	if err := seedRuntimeAuthIfMissing(store, codexHome, env["OPENAI_BASE_URL"]); err != nil {
 		return 1, err
 	}
 
@@ -192,7 +193,7 @@ func resolveCodexInvocation(store *Store, codexBin, proxyURL, codexHome string, 
 	return codexBin, fullArgs, codexHome, env, snapshot.Settings.Run.InheritShell
 }
 
-func seedRuntimeAuthIfMissing(store *Store, codexHome string) error {
+func seedRuntimeAuthIfMissing(store *Store, codexHome, proxyURL string) error {
 	targetAuth := filepath.Join(codexHome, "auth.json")
 	if _, err := os.Stat(targetAuth); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat runtime auth.json: %w", err)
@@ -220,10 +221,48 @@ func seedRuntimeAuthIfMissing(store *Store, codexHome string) error {
 		}
 	}
 
+	if remoteAuth, err := fetchRemoteRuntimeAuth(proxyURL); err == nil {
+		if err := os.WriteFile(targetAuth, remoteAuth, 0o600); err != nil {
+			return fmt.Errorf("seed runtime auth.json from remote proxy: %w", err)
+		}
+		return nil
+	}
+
 	if err := writeProxyOnlyRuntimeAuth(targetAuth); err != nil {
 		return fmt.Errorf("write proxy-only runtime auth.json: %w", err)
 	}
 	return nil
+}
+
+func fetchRemoteRuntimeAuth(proxyURL string) ([]byte, error) {
+	url := strings.TrimSpace(proxyURL)
+	if url == "" {
+		return nil, fmt.Errorf("empty proxy URL")
+	}
+	url = strings.TrimRight(url, "/") + "/admin/runtime-auth"
+
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("runtime auth request failed with status=%d", resp.StatusCode)
+	}
+
+	var payload AdminRuntimeAuthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode runtime auth response: %w", err)
+	}
+	if len(payload.Auth) == 0 {
+		return nil, fmt.Errorf("missing auth payload")
+	}
+	if !json.Valid(payload.Auth) {
+		return nil, fmt.Errorf("runtime auth payload is not valid JSON")
+	}
+	return payload.Auth, nil
 }
 
 func runtimeAuthCandidateIndexes(snapshot StoreFile, nowMS int64) []int {
@@ -251,9 +290,11 @@ func runtimeAuthCandidateIndexes(snapshot StoreFile, nowMS int64) []int {
 }
 
 func writeProxyOnlyRuntimeAuth(path string) error {
+	token := buildProxyOnlyAccessToken()
 	payload := map[string]any{
 		"tokens": map[string]any{
-			"access_token": buildProxyOnlyAccessToken(),
+			"access_token": token,
+			"id_token":     token,
 			"account_id":   "proxy-only",
 		},
 	}

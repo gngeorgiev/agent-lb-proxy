@@ -1,5 +1,7 @@
 package lb
 
+import "encoding/json"
+
 type AdminAccountsResponse struct {
 	Accounts []Account `json:"accounts"`
 }
@@ -23,4 +25,9 @@ type AdminMutationResponse struct {
 	OK      bool   `json:"ok"`
 	Message string `json:"message,omitempty"`
 	Total   int    `json:"total"`
+}
+
+type AdminRuntimeAuthResponse struct {
+	Auth        json.RawMessage `json:"auth"`
+	SourceAlias string          `json:"source_alias,omitempty"`
 }
