@@ -221,6 +221,113 @@ func TestSeedRuntimeAuthIfMissingFetchesFromRemoteProxy(t *testing.T) {
 	}
 }
 
+func TestSeedRuntimeAuthIfMissingCopiesUserConfigWhenAccountConfigMissing(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("CODEX_HOME", "")
+
+	userCodexHome := filepath.Join(root, ".codex")
+	if err := os.MkdirAll(userCodexHome, 0o700); err != nil {
+		t.Fatalf("mkdir user codex home: %v", err)
+	}
+	wantConfig := []byte("model = \"gpt-5.4\"\n")
+	if err := os.WriteFile(filepath.Join(userCodexHome, "config.toml"), wantConfig, 0o600); err != nil {
+		t.Fatalf("write user config.toml: %v", err)
+	}
+
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	accountHome := filepath.Join(root, "acc-a")
+	if err := os.MkdirAll(accountHome, 0o700); err != nil {
+		t.Fatalf("mkdir account home: %v", err)
+	}
+	writeAuthForTest(t, accountHome, "acct-a", "a@example.com")
+
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Accounts = []Account{
+			{Alias: "a", ID: "openai:a", HomeDir: accountHome, Enabled: true},
+		}
+		sf.State.ActiveIndex = 0
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	runtimeHome := filepath.Join(root, "runtime-user-config")
+	if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
+		t.Fatalf("mkdir runtime home: %v", err)
+	}
+	if err := seedRuntimeAuthIfMissing(store, runtimeHome, ""); err != nil {
+		t.Fatalf("seedRuntimeAuthIfMissing: %v", err)
+	}
+
+	gotConfig, err := os.ReadFile(filepath.Join(runtimeHome, "config.toml"))
+	if err != nil {
+		t.Fatalf("read runtime config.toml: %v", err)
+	}
+	if string(gotConfig) != string(wantConfig) {
+		t.Fatalf("runtime config.toml = %q, want %q", string(gotConfig), string(wantConfig))
+	}
+}
+
+func TestSeedRuntimeAuthIfMissingPrefersAccountConfigOverUserConfig(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("CODEX_HOME", "")
+
+	userCodexHome := filepath.Join(root, ".codex")
+	if err := os.MkdirAll(userCodexHome, 0o700); err != nil {
+		t.Fatalf("mkdir user codex home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(userCodexHome, "config.toml"), []byte("model = \"gpt-5.4\"\n"), 0o600); err != nil {
+		t.Fatalf("write user config.toml: %v", err)
+	}
+
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	accountHome := filepath.Join(root, "acc-a")
+	if err := os.MkdirAll(accountHome, 0o700); err != nil {
+		t.Fatalf("mkdir account home: %v", err)
+	}
+	writeAuthForTest(t, accountHome, "acct-a", "a@example.com")
+	wantConfig := []byte("model = \"gpt-5.2-codex\"\n")
+	if err := os.WriteFile(filepath.Join(accountHome, "config.toml"), wantConfig, 0o600); err != nil {
+		t.Fatalf("write account config.toml: %v", err)
+	}
+
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Accounts = []Account{
+			{Alias: "a", ID: "openai:a", HomeDir: accountHome, Enabled: true},
+		}
+		sf.State.ActiveIndex = 0
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	runtimeHome := filepath.Join(root, "runtime-account-config")
+	if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
+		t.Fatalf("mkdir runtime home: %v", err)
+	}
+	if err := seedRuntimeAuthIfMissing(store, runtimeHome, ""); err != nil {
+		t.Fatalf("seedRuntimeAuthIfMissing: %v", err)
+	}
+
+	gotConfig, err := os.ReadFile(filepath.Join(runtimeHome, "config.toml"))
+	if err != nil {
+		t.Fatalf("read runtime config.toml: %v", err)
+	}
+	if string(gotConfig) != string(wantConfig) {
+		t.Fatalf("runtime config.toml = %q, want %q", string(gotConfig), string(wantConfig))
+	}
+}
+
 func writeAuthForTest(t *testing.T, home, accountID, email string) {
 	t.Helper()
 	token := testJWT(map[string]any{

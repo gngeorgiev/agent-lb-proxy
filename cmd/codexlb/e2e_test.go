@@ -67,6 +67,47 @@ func TestE2EWrapperLoginAndRun(t *testing.T) {
 	}
 }
 
+func TestE2EWrapperRunSeedsRuntimeConfigFromUserCodexHome(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatalf("mkdir user codex home: %v", err)
+	}
+	wantConfig := []byte("model = \"gpt-5.4\"\n")
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), wantConfig, 0o600); err != nil {
+		t.Fatalf("write user config.toml: %v", err)
+	}
+
+	fakeLog := filepath.Join(root, "fake-codex.log")
+	fakeBin := filepath.Join(root, "codex")
+	writeFakeCodex(t, fakeBin)
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEXLB_CODEX_BIN", fakeBin)
+	t.Setenv("FAKE_LOG", fakeLog)
+	t.Setenv("FAKE_TOKEN", testJWT(map[string]any{
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-a"},
+	}))
+	t.Setenv("FAKE_ACCOUNT_ID", "acct-a")
+
+	if code := run([]string{"account", "login", "--root", root, "alice"}); code != 0 {
+		t.Fatalf("account login alice failed: %d", code)
+	}
+
+	runtimeHome := filepath.Join(root, "runtime-home")
+	if code := run([]string{"run", "--root", root, "--proxy-url", "http://127.0.0.1:9876", "--codex-home", runtimeHome, "exec", "--json", "ping"}); code != 0 {
+		t.Fatalf("wrapper run failed: %d", code)
+	}
+
+	gotConfig, err := os.ReadFile(filepath.Join(runtimeHome, "config.toml"))
+	if err != nil {
+		t.Fatalf("read runtime config.toml: %v", err)
+	}
+	if string(gotConfig) != string(wantConfig) {
+		t.Fatalf("runtime config.toml = %q, want %q", string(gotConfig), string(wantConfig))
+	}
+}
+
 func TestE2EAccountImport(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")

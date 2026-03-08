@@ -200,6 +200,9 @@ func seedRuntimeAuthIfMissing(store *Store, codexHome, proxyURL string) error {
 	}
 
 	snapshot := store.Snapshot()
+	if err := syncRuntimeConfig(snapshot, codexHome); err != nil {
+		return err
+	}
 	if len(snapshot.Accounts) > 0 {
 		candidates := runtimeAuthCandidateIndexes(snapshot, time.Now().UnixMilli())
 
@@ -216,11 +219,6 @@ func seedRuntimeAuthIfMissing(store *Store, codexHome, proxyURL string) error {
 			}
 			if err := os.WriteFile(targetAuth, normalizedAuth, 0o600); err != nil {
 				return fmt.Errorf("seed runtime auth.json from account %s: %w", snapshot.Accounts[idx].Alias, err)
-			}
-			sourceConfig := filepath.Join(home, "config.toml")
-			targetConfig := filepath.Join(codexHome, "config.toml")
-			if _, err := os.Stat(sourceConfig); err == nil {
-				_ = copyFile(sourceConfig, targetConfig, 0o600)
 			}
 			return nil
 		}
@@ -241,6 +239,72 @@ func seedRuntimeAuthIfMissing(store *Store, codexHome, proxyURL string) error {
 		return fmt.Errorf("write proxy-only runtime auth.json: %w", err)
 	}
 	return nil
+}
+
+func syncRuntimeConfig(snapshot StoreFile, codexHome string) error {
+	sourceConfig, sourceDesc := runtimeConfigSource(snapshot, codexHome)
+	if sourceConfig == "" {
+		return nil
+	}
+	targetConfig := filepath.Join(codexHome, "config.toml")
+	if sameCleanPath(sourceConfig, targetConfig) {
+		return nil
+	}
+	if err := copyFile(sourceConfig, targetConfig, 0o600); err != nil {
+		return fmt.Errorf("seed runtime config.toml from %s: %w", sourceDesc, err)
+	}
+	return nil
+}
+
+func runtimeConfigSource(snapshot StoreFile, codexHome string) (string, string) {
+	for _, idx := range runtimeAuthCandidateIndexes(snapshot, time.Now().UnixMilli()) {
+		if idx < 0 || idx >= len(snapshot.Accounts) {
+			continue
+		}
+		sourceConfig := filepath.Join(snapshot.Accounts[idx].HomeDir, "config.toml")
+		if isRegularFile(sourceConfig) {
+			return sourceConfig, fmt.Sprintf("account %s", snapshot.Accounts[idx].Alias)
+		}
+	}
+
+	if sourceConfig := defaultCodexConfigPath(codexHome); sourceConfig != "" {
+		return sourceConfig, "default Codex home"
+	}
+	return "", ""
+}
+
+func defaultCodexConfigPath(codexHome string) string {
+	candidates := []string{}
+	if envHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); envHome != "" {
+		candidates = append(candidates, envHome)
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		candidates = append(candidates, filepath.Join(home, ".codex"))
+	}
+
+	targetConfig := filepath.Join(codexHome, "config.toml")
+	for _, candidateHome := range candidates {
+		sourceConfig := filepath.Join(candidateHome, "config.toml")
+		if sameCleanPath(sourceConfig, targetConfig) {
+			continue
+		}
+		if isRegularFile(sourceConfig) {
+			return sourceConfig
+		}
+	}
+	return ""
+}
+
+func isRegularFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode().IsRegular()
+}
+
+func sameCleanPath(a, b string) bool {
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 func fetchRemoteRuntimeAuth(proxyURL string) ([]byte, error) {
@@ -302,10 +366,10 @@ func writeProxyOnlyRuntimeAuth(path string) error {
 	token := buildProxyOnlyAccessToken()
 	payload := map[string]any{
 		"tokens": map[string]any{
-			"access_token": token,
+			"access_token":  token,
 			"refresh_token": token,
-			"id_token":     token,
-			"account_id":   "proxy-only",
+			"id_token":      token,
+			"account_id":    "proxy-only",
 		},
 	}
 	b, err := json.Marshal(payload)
