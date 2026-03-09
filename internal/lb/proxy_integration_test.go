@@ -100,6 +100,73 @@ func TestProxySelectsAccountByUsage(t *testing.T) {
 	}
 }
 
+func TestProxyForwardsCompactResponsesPath(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	store, err := OpenStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	token := testJWT(map[string]any{
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-a"},
+	})
+	home := filepath.Join(tmp, "acc-a")
+	writeAuthFile(t, home, token, "acct-a")
+
+	var mu sync.Mutex
+	hits := []string{}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/wham/usage":
+			_, _ = io.WriteString(w, `{"rate_limit":{"primary_window":{"used_percent":10},"secondary_window":{"used_percent":10}}}`)
+			return
+		case "/backend-api/codex/responses/compact":
+			mu.Lock()
+			hits = append(hits, r.URL.Path)
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"ok":true}`)
+			return
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"detail":"Not Found"}`)
+			return
+		}
+	}))
+	defer upstream.Close()
+
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Settings.Proxy.UpstreamBaseURL = upstream.URL + "/backend-api"
+		sf.Accounts = []Account{
+			{ID: "a", Alias: "a", HomeDir: home, BaseURL: sf.Settings.Proxy.UpstreamBaseURL, Enabled: true},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	proxySrv := httptest.NewServer(NewProxyServer(store, nil, nil))
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/responses/compact", "application/json", bytes.NewBufferString(`{"input":"hi"}`))
+	if err != nil {
+		t.Fatalf("post to proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d, body=%s", resp.StatusCode, string(body))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hits) != 1 || hits[0] != "/backend-api/codex/responses/compact" {
+		t.Fatalf("unexpected upstream hits: %v", hits)
+	}
+}
+
 func TestProxyFailoverOn429(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()

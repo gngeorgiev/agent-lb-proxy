@@ -21,6 +21,30 @@ func TestRewriteForBackendResponses(t *testing.T) {
 	}
 }
 
+func TestRewriteForBackendResponsesCompact(t *testing.T) {
+	t.Parallel()
+	src, _ := url.Parse("http://127.0.0.1:8765/responses/compact")
+	next, err := rewriteForAccount(src, "https://chatgpt.com/backend-api")
+	if err != nil {
+		t.Fatalf("rewriteForAccount: %v", err)
+	}
+	if got, want := next.Path, "/backend-api/codex/responses/compact"; got != want {
+		t.Fatalf("path mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestRewriteForBackendV1ResponsesCompact(t *testing.T) {
+	t.Parallel()
+	src, _ := url.Parse("http://127.0.0.1:8765/v1/responses/compact")
+	next, err := rewriteForAccount(src, "https://chatgpt.com/backend-api")
+	if err != nil {
+		t.Fatalf("rewriteForAccount: %v", err)
+	}
+	if got, want := next.Path, "/backend-api/codex/responses/compact"; got != want {
+		t.Fatalf("path mismatch: got %q want %q", got, want)
+	}
+}
+
 func TestSetAccountHeaders(t *testing.T) {
 	t.Parallel()
 	h := http.Header{}
@@ -45,7 +69,9 @@ func TestShouldDisableForAuthFailure(t *testing.T) {
 	}{
 		{name: "401 always disables", status: http.StatusUnauthorized, path: "/", wantDisable: true},
 		{name: "403 responses disables", status: http.StatusForbidden, path: "/responses", wantDisable: true},
+		{name: "403 compact responses disables", status: http.StatusForbidden, path: "/responses/compact", wantDisable: true},
 		{name: "403 v1 responses disables", status: http.StatusForbidden, path: "/v1/responses", wantDisable: true},
+		{name: "403 v1 compact responses disables", status: http.StatusForbidden, path: "/v1/responses/compact", wantDisable: true},
 		{name: "403 chat completions disables", status: http.StatusForbidden, path: "/chat/completions", wantDisable: true},
 		{name: "403 models does not disable", status: http.StatusForbidden, path: "/models", wantDisable: false},
 		{name: "403 root does not disable", status: http.StatusForbidden, path: "/", wantDisable: false},

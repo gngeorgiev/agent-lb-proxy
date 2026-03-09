@@ -26,7 +26,9 @@ func rewriteForAccount(src *url.URL, baseURL string) (*url.URL, error) {
 		if !strings.Contains(codexPrefix, "/codex") {
 			codexPrefix = codexPrefix + "/codex"
 		}
-		if sourcePath == "/responses" || strings.Contains(sourcePath, "/v1/responses") || strings.Contains(sourcePath, "/chat/completions") {
+		if responsePathSuffix, ok := accountResponsesSuffix(sourcePath); ok {
+			next.Path = codexPrefix + "/responses" + responsePathSuffix
+		} else if strings.Contains(sourcePath, "/chat/completions") {
 			next.Path = codexPrefix + "/responses"
 		} else {
 			next.Path = joinPath(basePath, sourcePath)
@@ -74,10 +76,25 @@ func shouldDisableForAuthFailure(status int, requestPath string) bool {
 
 func isAccountScopedPath(requestPath string) bool {
 	requestPath = strings.ToLower(requestPath)
-	return requestPath == "/responses" ||
-		strings.Contains(requestPath, "/v1/responses") ||
+	_, ok := accountResponsesSuffix(requestPath)
+	return ok ||
 		strings.Contains(requestPath, "/chat/completions") ||
 		strings.Contains(requestPath, "/backend-api/codex/responses")
+}
+
+func accountResponsesSuffix(requestPath string) (string, bool) {
+	requestPath = strings.ToLower(requestPath)
+	switch {
+	case requestPath == "/responses":
+		return "", true
+	case strings.HasPrefix(requestPath, "/responses/"):
+		return strings.TrimPrefix(requestPath, "/responses"), true
+	case strings.Contains(requestPath, "/v1/responses"):
+		suffix, ok := strings.CutPrefix(requestPath, "/v1/responses")
+		return suffix, ok
+	default:
+		return "", false
+	}
 }
 
 func defaultBackoffSeconds(status int, fallback int) int {
