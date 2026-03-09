@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -377,6 +378,17 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now tim
 
 		resp, err := p.requestClient.Do(upstreamReq)
 		if err != nil {
+			if isCanceledRequest(r.Context(), err) {
+				p.logEvent("request.canceled", map[string]any{
+					"req_id":     reqID,
+					"attempt":    attempt,
+					"account_id": account.ID,
+					"method":     r.Method,
+					"path":       r.URL.Path,
+					"error":      err.Error(),
+				})
+				return
+			}
 			p.markCooldown(account.ID, 0, snapshot.Settings.Proxy.CooldownDefaultS, "transport-error")
 			lastErr = err
 			p.logEvent("request.transport_error", map[string]any{
@@ -403,6 +415,17 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now tim
 				upstreamReq.Host = targetURL.Host
 				resp, err = p.requestClient.Do(upstreamReq)
 				if err != nil {
+					if isCanceledRequest(r.Context(), err) {
+						p.logEvent("request.canceled", map[string]any{
+							"req_id":     reqID,
+							"attempt":    attempt,
+							"account_id": account.ID,
+							"method":     r.Method,
+							"path":       r.URL.Path,
+							"error":      err.Error(),
+						})
+						return
+					}
 					p.markCooldown(account.ID, 0, snapshot.Settings.Proxy.CooldownDefaultS, "transport-error")
 					lastErr = err
 					p.logEvent("request.transport_error", map[string]any{
@@ -514,6 +537,13 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now tim
 		"error":  "no account available",
 	})
 	http.Error(w, "no account available", http.StatusServiceUnavailable)
+}
+
+func isCanceledRequest(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil
 }
 
 func (p *ProxyServer) handleWebsocket(w http.ResponseWriter, r *http.Request, now time.Time, reqID uint64) {

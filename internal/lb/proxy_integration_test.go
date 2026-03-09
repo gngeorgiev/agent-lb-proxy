@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -167,6 +169,12 @@ func TestProxyForwardsCompactResponsesPath(t *testing.T) {
 	}
 }
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
 func TestProxyFailoverOn429(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
@@ -246,6 +254,138 @@ func TestProxyFailoverOn429(t *testing.T) {
 	snap := store.Snapshot()
 	if snap.Accounts[0].CooldownUntilMS <= time.Now().UnixMilli() {
 		t.Fatalf("expected account a cooldown to be set")
+	}
+}
+
+func TestProxyDoesNotCooldownOrRetryCanceledRequest(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	store, err := OpenStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	tokenA := testJWT(map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-a"}})
+	tokenB := testJWT(map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-b"}})
+	homeA := filepath.Join(tmp, "acc-a")
+	homeB := filepath.Join(tmp, "acc-b")
+	writeAuthFile(t, homeA, tokenA, "acct-a")
+	writeAuthFile(t, homeB, tokenB, "acct-b")
+
+	var mu sync.Mutex
+	order := []string{}
+
+	nowMS := time.Now().UnixMilli()
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Settings.Proxy.UpstreamBaseURL = "https://chatgpt.com/backend-api"
+		sf.Settings.Proxy.MaxAttempts = 3
+		sf.Settings.Policy.Mode = PolicySticky
+		sf.Settings.Quota.RefreshIntervalMinutes = 999
+		sf.Settings.Quota.RefreshIntervalMessages = 999
+		sf.State.ActiveIndex = 0
+		sf.State.MessageCounter = 0
+		sf.Accounts = []Account{
+			{
+				ID:      "a",
+				Alias:   "a",
+				HomeDir: homeA,
+				BaseURL: sf.Settings.Proxy.UpstreamBaseURL,
+				Enabled: true,
+				Quota: QuotaState{
+					DailyLimit:             100,
+					DailyUsed:              10,
+					WeeklyLimit:            100,
+					WeeklyUsed:             10,
+					LastSyncAt:             nowMS,
+					LastSyncMessageCounter: 0,
+					Source:                 "openai_usage_api",
+				},
+			},
+			{
+				ID:      "b",
+				Alias:   "b",
+				HomeDir: homeB,
+				BaseURL: sf.Settings.Proxy.UpstreamBaseURL,
+				Enabled: true,
+				Quota: QuotaState{
+					DailyLimit:             100,
+					DailyUsed:              20,
+					WeeklyLimit:            100,
+					WeeklyUsed:             20,
+					LastSyncAt:             nowMS,
+					LastSyncMessageCounter: 0,
+					Source:                 "openai_usage_api",
+				},
+			},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	proxy := NewProxyServer(store, nil, nil)
+	proxy.requestClient = &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if r.URL.Path != "/backend-api/codex/responses" {
+				return nil, &url.Error{Op: r.Method, URL: r.URL.String(), Err: errors.New("unexpected path")}
+			}
+			mu.Lock()
+			order = append(order, token)
+			mu.Unlock()
+			<-r.Context().Done()
+			return nil, &url.Error{Op: r.Method, URL: r.URL.String(), Err: r.Context().Err()}
+		}),
+	}
+	reqCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "http://proxy.test/responses", bytes.NewBufferString(`{"input":"hi"}`)).WithContext(reqCtx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		proxy.ServeHTTP(rec, req)
+	}()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		attempts := len(order)
+		mu.Unlock()
+		if attempts >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for upstream request")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for canceled proxy request")
+	}
+
+	mu.Lock()
+	if len(order) != 1 || order[0] != tokenA {
+		t.Fatalf("unexpected upstream order: %v", order)
+	}
+	mu.Unlock()
+
+	snap := store.Snapshot()
+	if snap.Accounts[0].CooldownUntilMS > time.Now().UnixMilli() {
+		t.Fatalf("expected account a cooldown to remain clear")
+	}
+	if snap.Accounts[1].CooldownUntilMS > time.Now().UnixMilli() {
+		t.Fatalf("expected account b cooldown to remain clear")
+	}
+	if snap.Accounts[0].LastSwitchReason == "transport-error" || snap.Accounts[1].LastSwitchReason == "transport-error" {
+		t.Fatalf("expected canceled request not to stamp transport-error, got a=%q b=%q", snap.Accounts[0].LastSwitchReason, snap.Accounts[1].LastSwitchReason)
 	}
 }
 
