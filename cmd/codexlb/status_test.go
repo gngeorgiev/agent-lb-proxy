@@ -23,7 +23,7 @@ func TestStatusCommandPrintsTable(t *testing.T) {
 		State:             lb.RuntimeState{PinnedAccountID: "openai:alice"},
 		SelectionReason:   "usage-stay",
 		Accounts: []lb.AccountStatus{
-			{Alias: "alice", ID: "openai:alice", Email: "a@example.com", Active: true, Healthy: true, Enabled: true, DailyLeftPct: 80, WeeklyLeftPct: 70, Score: 0.75},
+			{Alias: "alice", ID: "openai:alice", Email: "a@example.com", Active: true, Healthy: true, Enabled: true, DailyLeftPct: 80, DailyResetAt: 1710000000, WeeklyLeftPct: 70, WeeklyResetAt: 1710600000, Score: 0.75},
 		},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -52,6 +52,12 @@ func TestStatusCommandPrintsTable(t *testing.T) {
 	}
 	if !strings.Contains(out, "alice") {
 		t.Fatalf("expected account row in output: %s", out)
+	}
+	if !strings.Contains(out, "2024-03-09T16:00:00Z") {
+		t.Fatalf("expected daily reset timestamp in output: %s", out)
+	}
+	if !strings.Contains(out, "2024-03-16T14:40:00Z") {
+		t.Fatalf("expected weekly reset timestamp in output: %s", out)
 	}
 }
 

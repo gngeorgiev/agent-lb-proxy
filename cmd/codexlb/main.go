@@ -896,7 +896,7 @@ func printStatusTable(status lb.ProxyStatus) {
 	pinnedAlias := pinnedAliasForStatus(status)
 	fmt.Printf("policy=%s selected=%s pinned=%s reason=%s generated_at=%s\n", status.Policy.Mode, noneIfEmpty(status.SelectedAccountID), noneIfEmpty(pinnedAlias), noneIfEmpty(status.SelectionReason), status.GeneratedAt)
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ACTIVE\tPIN\tALIAS\tID\tEMAIL\tSTATUS\tDAILY_LEFT\tWEEKLY_LEFT\tSCORE\tLAST_SWITCH\tQUOTA")
+	_, _ = fmt.Fprintln(w, "ACTIVE\tPIN\tALIAS\tID\tEMAIL\tSTATUS\tDAILY_LEFT\tDAILY_RESET\tWEEKLY_LEFT\tWEEKLY_RESET\tSCORE\tLAST_SWITCH\tQUOTA")
 	pinnedID := strings.TrimSpace(status.State.PinnedAccountID)
 	for _, a := range status.Accounts {
 		active := ""
@@ -923,10 +923,12 @@ func printStatusTable(status lb.ProxyStatus) {
 		if a.DailyLeftPct >= 0 {
 			daily = fmt.Sprintf("%.1f%%", a.DailyLeftPct)
 		}
+		dailyReset := formatStatusResetAt(a.DailyResetAt)
 		weekly := "-"
 		if a.WeeklyLeftPct >= 0 {
 			weekly = fmt.Sprintf("%.1f%%", a.WeeklyLeftPct)
 		}
+		weeklyReset := formatStatusResetAt(a.WeeklyResetAt)
 		email := "-"
 		if a.Email != "" {
 			email = a.Email
@@ -939,10 +941,17 @@ func printStatusTable(status lb.ProxyStatus) {
 		if a.QuotaSource != "" {
 			quota = a.QuotaSource
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.3f\t%s\t%s\n",
-			active, pin, a.Alias, a.ID, email, state, daily, weekly, a.Score, lastSwitch, quota)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.3f\t%s\t%s\n",
+			active, pin, a.Alias, a.ID, email, state, daily, dailyReset, weekly, weeklyReset, a.Score, lastSwitch, quota)
 	}
 	_ = w.Flush()
+}
+
+func formatStatusResetAt(ts int64) string {
+	if ts <= 0 {
+		return "-"
+	}
+	return time.Unix(ts, 0).UTC().Format(time.RFC3339)
 }
 
 func pinnedAliasForStatus(status lb.ProxyStatus) string {

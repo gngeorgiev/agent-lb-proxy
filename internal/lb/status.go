@@ -25,7 +25,9 @@ type AccountStatus struct {
 	DisabledReason   string  `json:"disabled_reason,omitempty"`
 	CooldownSeconds  int64   `json:"cooldown_seconds"`
 	DailyLeftPct     float64 `json:"daily_left_pct"`
+	DailyResetAt     int64   `json:"daily_reset_at"`
 	WeeklyLeftPct    float64 `json:"weekly_left_pct"`
+	WeeklyResetAt    int64   `json:"weekly_reset_at"`
 	Score            float64 `json:"score"`
 	LastUsedAtMS     int64   `json:"last_used_at_ms"`
 	LastSwitchReason string  `json:"last_switch_reason,omitempty"`
@@ -75,7 +77,9 @@ func BuildProxyStatus(sf StoreFile, now time.Time) ProxyStatus {
 			DisabledReason:   a.DisabledReason,
 			CooldownSeconds:  cooldownSec,
 			DailyLeftPct:     dailyLeft,
+			DailyResetAt:     a.Quota.DailyResetAt,
 			WeeklyLeftPct:    weeklyLeft,
+			WeeklyResetAt:    a.Quota.WeeklyResetAt,
 			Score:            score(a, sf.Settings.Policy),
 			LastUsedAtMS:     a.LastUsedAtMS,
 			LastSwitchReason: a.LastSwitchReason,
