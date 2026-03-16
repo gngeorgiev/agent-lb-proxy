@@ -7,6 +7,7 @@ It lets you run Codex through a local proxy that can switch between multiple aut
 ## Features
 
 - Multi-account enrollment (`auth.json` per alias)
+- Dockerized browser login flow for importing host Codex credentials
 - Per-request account selection (`usage_balanced`, `sticky`, `round_robin`)
 - Automatic failover/cooldown on `429` and `5xx`
 - Automatic disable on auth errors (`401`, `403`)
@@ -46,6 +47,9 @@ make install PREFIX=$HOME/.local
 
 # Or import an existing Codex home:
 ./codexlb account import --from ~/.agentlb/sessions/alice alice
+
+# Or bootstrap a host CODEX_HOME through a Dockerized Chrome login:
+printf '%s\n' "$CHATGPT_PASSWORD" | ./codexlb login-with work --username you@example.com --password-stdin --docker-network vpn_net
 ```
 
 2. Start proxy:
@@ -332,6 +336,25 @@ Usage:
 ```bash
 codexlb account unpin [--root DIR] [--proxy-url URL]
 ```
+
+### `codexlb login-with`
+
+Run `codex login` inside a published Docker image, complete the OpenAI login flow in Chromium, and import the resulting credentials back into the host `CODEX_HOME` and a named codexlb account alias.
+
+Usage:
+
+```bash
+codexlb login-with [--root DIR] <alias> --username <email> (--password <password> | --password-stdin) [--codex-home DIR] [--docker-network NAME] [--docker-image TAG] [--timeout 10m]
+```
+
+Notes:
+
+- The first positional argument is the codexlb account alias that will receive the imported auth under `~/.codex-lb/accounts/<alias>` (or the chosen `--root`).
+- The container is attached to the Docker network selected by `--docker-network`, so you can point it at a VPN-enabled network namespace when needed.
+- Credentials are also written back into host `CODEX_HOME` (`$CODEX_HOME` when set, otherwise `~/.codex`).
+- By default the command uses the published image `ghcr.io/gngeorgiev/agent-lb-proxy-login:latest`; `--docker-image` overrides it.
+- `--password-stdin` avoids leaking the password into shell history.
+- The automation is designed for username/password sign-in. If OpenAI prompts for CAPTCHA, MFA, or another interactive checkpoint, the containerized flow may still require manual handling.
 
 ### Proxy Admin API
 

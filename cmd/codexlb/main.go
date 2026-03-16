@@ -36,6 +36,8 @@ func run(argv []string) int {
 		return runProxy(argv[1:])
 	case "account":
 		return runAccount(argv[1:])
+	case "login-with":
+		return runLoginWith(argv[1:])
 	case "status":
 		return runStatus(argv[1:])
 	case "run":
@@ -654,6 +656,114 @@ Flags:
 	return 0
 }
 
+func runLoginWith(argv []string) int {
+	alias := ""
+	parseArgv := argv
+	if len(argv) > 0 && !strings.HasPrefix(argv[0], "-") {
+		alias = argv[0]
+		parseArgv = argv[1:]
+	}
+
+	fs := flag.NewFlagSet("login-with", flag.ContinueOnError)
+	root := fs.String("root", "", "State directory")
+	username := fs.String("username", "", "ChatGPT/OpenAI username or email")
+	password := fs.String("password", "", "Password passed directly on the command line")
+	passwordStdin := fs.Bool("password-stdin", false, "Read password from stdin")
+	codexHome := fs.String("codex-home", "", "Host CODEX_HOME destination (default: $CODEX_HOME or ~/.codex)")
+	dockerBin := fs.String("docker-bin", "docker", "Docker executable path")
+	dockerImage := fs.String("docker-image", lb.DefaultLoginDockerImage, "Docker image used for the automated login flow")
+	dockerNetwork := fs.String("docker-network", "bridge", "Docker network to join while running the login container")
+	timeout := fs.Duration("timeout", 10*time.Minute, "Overall timeout for the login flow")
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), `Usage: codexlb login-with [flags] <alias>
+
+Run codex login inside a published Docker image, complete the ChatGPT browser flow in Chromium,
+and import the resulting credentials back into the host CODEX_HOME and the named codexlb account alias.
+
+Flags:
+`)
+		fs.PrintDefaults()
+		fmt.Fprint(fs.Output(), `
+Examples:
+  codexlb login-with work --username you@example.com --password-stdin
+  codexlb login-with work --username you@example.com --password 's3cret' --docker-network vpn_net
+  codexlb login-with work --username you@example.com --codex-home ~/.codex-work --docker-image ghcr.io/acme/custom-login:latest
+`)
+	}
+	if err := fs.Parse(parseArgv); err != nil {
+		return parseFlagError(err)
+	}
+	if alias == "" {
+		if len(fs.Args()) != 1 {
+			fs.Usage()
+			return 2
+		}
+		alias = fs.Args()[0]
+	} else if len(fs.Args()) != 0 {
+		fs.Usage()
+		return 2
+	}
+	if strings.TrimSpace(*username) == "" {
+		fmt.Fprintln(os.Stderr, "login-with: --username is required")
+		return 2
+	}
+	if (*password == "") == (!*passwordStdin) {
+		fmt.Fprintln(os.Stderr, "login-with: specify exactly one of --password or --password-stdin")
+		return 2
+	}
+
+	secret := *password
+	if *passwordStdin {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "login-with: read password from stdin: %v\n", err)
+			return 1
+		}
+		secret = strings.TrimRight(string(data), "\r\n")
+	}
+	if strings.TrimSpace(secret) == "" {
+		fmt.Fprintln(os.Stderr, "login-with: password is empty")
+		return 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	store, err := lb.OpenStore(*root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "login-with: open store: %v\n", err)
+		return 1
+	}
+
+	if err := lb.LoginWithDocker(ctx, lb.DockerLoginOptions{
+		Username:      *username,
+		Password:      secret,
+		DockerBin:     *dockerBin,
+		DockerImage:   *dockerImage,
+		DockerNetwork: *dockerNetwork,
+		CodexHome:     *codexHome,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "login-with: %v\n", err)
+		return 1
+	}
+
+	targetHome := *codexHome
+	if strings.TrimSpace(targetHome) == "" {
+		var err error
+		targetHome, err = lb.DefaultCodexHome()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "login-with: %v\n", err)
+			return 1
+		}
+	}
+	if err := lb.ImportAccount(store, alias, targetHome); err != nil {
+		fmt.Fprintf(os.Stderr, "login-with: import account %s: %v\n", alias, err)
+		return 1
+	}
+	fmt.Printf("imported login credentials into %s and registered account %s\n", targetHome, alias)
+	return 0
+}
+
 func tryRemotePinWithFallback(store *lb.Store, alias string) error {
 	client := remoteAdminFallbackClient()
 	_, err := remoteAdminPinWithClient(client, resolveProxyURL(store, ""), alias)
@@ -1010,6 +1120,7 @@ Usage:
 Commands:
   proxy    Run proxy server (or use 'proxy logs')
   account  Manage enrolled accounts (login/import/list/rm/pin/unpin)
+  login-with  Run a Dockerized browser login flow and import the resulting auth into host CODEX_HOME
   status   Show runtime status table from running proxy
   run      Run codex with proxy endpoint environment wiring
 

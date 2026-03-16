@@ -83,6 +83,7 @@ func TestE2EWrapperRunSeedsRuntimeConfigFromUserCodexHome(t *testing.T) {
 	writeFakeCodex(t, fakeBin)
 
 	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CODEXLB_CODEX_BIN", fakeBin)
 	t.Setenv("FAKE_LOG", fakeLog)
 	t.Setenv("FAKE_TOKEN", testJWT(map[string]any{

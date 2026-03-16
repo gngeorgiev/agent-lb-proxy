@@ -1,4 +1,4 @@
-name: Publish Docker Image
+name: Publish Docker Images
 
 on:
   push:
@@ -17,6 +17,15 @@ env:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - image_suffix: ""
+            dockerfile: ./Dockerfile
+            context: .
+          - image_suffix: -login
+            dockerfile: ./internal/lb/loginimage/Dockerfile
+            context: ./internal/lb/loginimage
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,15 +47,15 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}
           tags: |
             type=raw,value=latest
 
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           tags: ${{ steps.meta.outputs.tags }}
