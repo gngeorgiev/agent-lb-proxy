@@ -9,6 +9,7 @@ func TestBuildProxyStatusIncludesSelectionAndScores(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0)
 	sf := defaultStore()
+	sf.Settings.Proxy.Name = "edge-a"
 	sf.Settings.Policy.Mode = PolicyUsageBalanced
 	sf.State.ActiveIndex = 0
 	sf.Accounts = []Account{
@@ -39,6 +40,9 @@ func TestBuildProxyStatusIncludesSelectionAndScores(t *testing.T) {
 	}
 
 	status := BuildProxyStatus(sf, now)
+	if status.ProxyName != "edge-a" {
+		t.Fatalf("expected proxy name edge-a, got %q", status.ProxyName)
+	}
 	if status.SelectedAccountID != "openai:bob" {
 		t.Fatalf("expected bob selected, got %q", status.SelectedAccountID)
 	}
@@ -47,6 +51,9 @@ func TestBuildProxyStatusIncludesSelectionAndScores(t *testing.T) {
 	}
 	if status.Accounts[0].Alias != "alice" || !status.Accounts[0].Active {
 		t.Fatalf("expected active account sorted first")
+	}
+	if status.Accounts[0].ProxyName != "edge-a" || status.Accounts[1].ProxyName != "edge-a" {
+		t.Fatalf("expected account proxy names to be populated: %+v", status.Accounts)
 	}
 }
 

@@ -1,6 +1,8 @@
 package lb
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,12 +20,14 @@ type configFile struct {
 }
 
 type configProxy struct {
-	Listen                 string `toml:"listen"`
-	UpstreamBaseURL        string `toml:"upstream_base_url"`
-	ProxyURL               string `toml:"proxy_url"`
-	MaxAttempts            int    `toml:"max_attempts"`
-	UsageTimeoutMS         int    `toml:"usage_timeout_ms"`
-	CooldownDefaultSeconds int    `toml:"cooldown_default_seconds"`
+	Name                   string   `toml:"name"`
+	Listen                 string   `toml:"listen"`
+	UpstreamBaseURL        string   `toml:"upstream_base_url"`
+	ChildProxyURLs         []string `toml:"child_proxy_urls"`
+	ProxyURL               string   `toml:"proxy_url"`
+	MaxAttempts            int      `toml:"max_attempts"`
+	UsageTimeoutMS         int      `toml:"usage_timeout_ms"`
+	CooldownDefaultSeconds int      `toml:"cooldown_default_seconds"`
 }
 
 type configPolicy struct {
@@ -61,12 +65,14 @@ type partialConfigFile struct {
 }
 
 type partialConfigProxy struct {
-	Listen                 *string `toml:"listen"`
-	UpstreamBaseURL        *string `toml:"upstream_base_url"`
-	ProxyURL               *string `toml:"proxy_url"`
-	MaxAttempts            *int    `toml:"max_attempts"`
-	UsageTimeoutMS         *int    `toml:"usage_timeout_ms"`
-	CooldownDefaultSeconds *int    `toml:"cooldown_default_seconds"`
+	Name                   *string   `toml:"name"`
+	Listen                 *string   `toml:"listen"`
+	UpstreamBaseURL        *string   `toml:"upstream_base_url"`
+	ChildProxyURLs         *[]string `toml:"child_proxy_urls"`
+	ProxyURL               *string   `toml:"proxy_url"`
+	MaxAttempts            *int      `toml:"max_attempts"`
+	UsageTimeoutMS         *int      `toml:"usage_timeout_ms"`
+	CooldownDefaultSeconds *int      `toml:"cooldown_default_seconds"`
 }
 
 type partialConfigPolicy struct {
@@ -105,6 +111,7 @@ func loadOrCreateSettingsConfig(root string) (Settings, error) {
 	bytes, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			fallback.Proxy.Name = newRandomProxyName()
 			if err := WriteSettingsConfig(root, fallback); err != nil {
 				return Settings{}, err
 			}
@@ -119,12 +126,19 @@ func loadOrCreateSettingsConfig(root string) (Settings, error) {
 	}
 
 	out := fallback
+	shouldPersist := false
 	if partial.Proxy != nil {
+		if partial.Proxy.Name != nil {
+			out.Proxy.Name = strings.TrimSpace(*partial.Proxy.Name)
+		}
 		if partial.Proxy.Listen != nil {
 			out.Proxy.Listen = strings.TrimSpace(*partial.Proxy.Listen)
 		}
 		if partial.Proxy.UpstreamBaseURL != nil {
 			out.Proxy.UpstreamBaseURL = strings.TrimRight(strings.TrimSpace(*partial.Proxy.UpstreamBaseURL), "/")
+		}
+		if partial.Proxy.ChildProxyURLs != nil {
+			out.Proxy.ChildProxyURLs = normalizeProxyURLList(*partial.Proxy.ChildProxyURLs)
 		}
 		if partial.Proxy.ProxyURL != nil {
 			out.ProxyURL = strings.TrimSpace(*partial.Proxy.ProxyURL)
@@ -197,6 +211,15 @@ func loadOrCreateSettingsConfig(root string) (Settings, error) {
 	tmp := defaultStore()
 	tmp.Settings = out
 	out = mergeDefaults(tmp).Settings
+	if out.Proxy.Name == "" {
+		out.Proxy.Name = newRandomProxyName()
+		shouldPersist = true
+	}
+	if shouldPersist {
+		if err := WriteSettingsConfig(root, out); err != nil {
+			return Settings{}, err
+		}
+	}
 
 	return out, nil
 }
@@ -219,8 +242,10 @@ func WriteSettingsConfig(root string, settings Settings) error {
 func settingsToConfig(settings Settings) configFile {
 	return configFile{
 		Proxy: configProxy{
+			Name:                   settings.Proxy.Name,
 			Listen:                 settings.Proxy.Listen,
 			UpstreamBaseURL:        settings.Proxy.UpstreamBaseURL,
+			ChildProxyURLs:         append([]string(nil), settings.Proxy.ChildProxyURLs...),
 			ProxyURL:               settings.ProxyURL,
 			MaxAttempts:            settings.Proxy.MaxAttempts,
 			UsageTimeoutMS:         settings.Proxy.UsageTimeoutMS,
@@ -247,4 +272,12 @@ func settingsToConfig(settings Settings) configFile {
 			InheritShell: settings.Run.InheritShell,
 		},
 	}
+}
+
+func newRandomProxyName() string {
+	var buf [4]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "proxy"
+	}
+	return "proxy-" + hex.EncodeToString(buf[:])
 }

@@ -16,11 +16,13 @@ func TestReloadSettingsFromConfigUpdatesUpstreamAndTrackedAccountBaseURL(t *test
 	}
 
 	origListen := "127.0.0.1:8765"
+	origName := "edge-a"
 	oldUpstream := "https://old.example/backend-api"
 	newUpstream := "https://new.example/backend-api"
 	customUpstream := "https://custom.example/backend-api"
 
 	if err := store.Update(func(sf *StoreFile) error {
+		sf.Settings.Proxy.Name = origName
 		sf.Settings.Proxy.Listen = origListen
 		sf.Settings.Proxy.UpstreamBaseURL = oldUpstream
 		sf.Accounts = []Account{
@@ -33,8 +35,10 @@ func TestReloadSettingsFromConfigUpdatesUpstreamAndTrackedAccountBaseURL(t *test
 	}
 
 	cfg := store.Snapshot().Settings
+	cfg.Proxy.Name = "edge-b"
 	cfg.Proxy.UpstreamBaseURL = newUpstream
 	cfg.Proxy.Listen = "127.0.0.1:9999"
+	cfg.Proxy.ChildProxyURLs = []string{"http://child-a.internal", "http://child-b.internal"}
 	if err := WriteSettingsConfig(root, cfg); err != nil {
 		t.Fatalf("WriteSettingsConfig: %v", err)
 	}
@@ -57,8 +61,14 @@ func TestReloadSettingsFromConfigUpdatesUpstreamAndTrackedAccountBaseURL(t *test
 	if snap.Settings.Proxy.Listen != origListen {
 		t.Fatalf("expected listen to stay %s, got %s", origListen, snap.Settings.Proxy.Listen)
 	}
+	if snap.Settings.Proxy.Name != "edge-b" {
+		t.Fatalf("expected proxy name edge-b, got %s", snap.Settings.Proxy.Name)
+	}
 	if snap.Settings.Proxy.UpstreamBaseURL != newUpstream {
 		t.Fatalf("expected upstream %s, got %s", newUpstream, snap.Settings.Proxy.UpstreamBaseURL)
+	}
+	if got := snap.Settings.Proxy.ChildProxyURLs; len(got) != 2 || got[0] != "http://child-a.internal" || got[1] != "http://child-b.internal" {
+		t.Fatalf("expected child proxy urls to reload, got %#v", got)
 	}
 	if got := snap.Accounts[0].BaseURL; got != newUpstream {
 		t.Fatalf("expected tracked account base URL %s, got %s", newUpstream, got)

@@ -37,6 +37,10 @@ type ProxyServer struct {
 
 	refreshInFlight atomic.Bool
 	requestSeq      atomic.Uint64
+
+	childProxyMu        sync.Mutex
+	childProxyStates    map[string]childProxyRuntime
+	childProxyActiveURL string
 }
 
 const maxDisableBodyLogBytes = 2048
@@ -62,10 +66,11 @@ func NewProxyServer(store *Store, logger *log.Logger, events *EventLogger) *Prox
 		usageClient: &http.Client{
 			Transport: usageTransport,
 		},
-		logger:       logger,
-		events:       events,
-		authTokenURL: defaultAuthTokenURL,
-		authClientID: defaultAuthClientID,
+		logger:           logger,
+		events:           events,
+		authTokenURL:     defaultAuthTokenURL,
+		authClientID:     defaultAuthClientID,
+		childProxyStates: make(map[string]childProxyRuntime),
 	}
 }
 
@@ -91,9 +96,10 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/status" {
 		now := time.Now()
 		p.expireCooldowns(now)
+		p.expireChildProxyCooldowns(now)
 		p.maybeRefreshQuota(context.WithoutCancel(r.Context()), now, true)
 		snapshot := p.store.Snapshot()
-		status := BuildProxyStatus(snapshot, now)
+		status := p.buildStatus(context.WithoutCancel(r.Context()), snapshot, now)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(status)
@@ -135,6 +141,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	p.expireCooldowns(now)
+	p.expireChildProxyCooldowns(now)
 	p.maybeRefreshQuota(r.Context(), now, false)
 
 	if isWebSocketUpgrade(r) {
@@ -338,6 +345,10 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now tim
 	_ = r.Body.Close()
 
 	snapshot := p.store.Snapshot()
+	if hasChildProxyRouting(snapshot) {
+		p.handleHTTPViaChildProxies(w, r, body, snapshot, now, reqID)
+		return
+	}
 	maxAttempts := max(1, snapshot.Settings.Proxy.MaxAttempts)
 
 	var lastResp *http.Response
@@ -553,6 +564,12 @@ func isCanceledRequest(ctx context.Context, err error) bool {
 }
 
 func (p *ProxyServer) handleWebsocket(w http.ResponseWriter, r *http.Request, now time.Time, reqID uint64) {
+	snapshot := p.store.Snapshot()
+	if hasChildProxyRouting(snapshot) {
+		p.handleWebsocketViaChildProxy(w, r, snapshot, now, reqID)
+		return
+	}
+
 	sel, account, auth, err := p.pickAccount(now)
 	if err != nil {
 		p.logEvent("websocket.selection_failed", map[string]any{

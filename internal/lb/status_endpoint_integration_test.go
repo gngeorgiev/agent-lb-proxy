@@ -20,6 +20,7 @@ func TestProxyStatusEndpoint(t *testing.T) {
 
 	nowMS := time.Now().UnixMilli()
 	if err := store.Update(func(sf *StoreFile) error {
+		sf.Settings.Proxy.Name = "edge-a"
 		sf.Settings.Policy.Mode = PolicyUsageBalanced
 		sf.Accounts = []Account{
 			{
@@ -72,8 +73,16 @@ func TestProxyStatusEndpoint(t *testing.T) {
 	if status.SelectedAccountID != "openai:bob" {
 		t.Fatalf("expected selected openai:bob, got %q", status.SelectedAccountID)
 	}
+	if status.ProxyName != "edge-a" {
+		t.Fatalf("expected proxy name edge-a, got %q", status.ProxyName)
+	}
 	if len(status.Accounts) != 2 {
 		t.Fatalf("expected 2 accounts, got %d", len(status.Accounts))
+	}
+	for _, account := range status.Accounts {
+		if account.ProxyName != "edge-a" {
+			t.Fatalf("expected account proxy name edge-a, got %+v", account)
+		}
 	}
 }
 

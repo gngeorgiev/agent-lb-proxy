@@ -14,11 +14,13 @@ const (
 )
 
 type ProxyConfig struct {
-	Listen           string `json:"listen"`
-	UpstreamBaseURL  string `json:"upstream_base_url"`
-	MaxAttempts      int    `json:"max_attempts"`
-	UsageTimeoutMS   int    `json:"usage_timeout_ms"`
-	CooldownDefaultS int    `json:"cooldown_default_seconds"`
+	Name             string   `json:"name"`
+	Listen           string   `json:"listen"`
+	UpstreamBaseURL  string   `json:"upstream_base_url"`
+	ChildProxyURLs   []string `json:"child_proxy_urls,omitempty"`
+	MaxAttempts      int      `json:"max_attempts"`
+	UsageTimeoutMS   int      `json:"usage_timeout_ms"`
+	CooldownDefaultS int      `json:"cooldown_default_seconds"`
 }
 
 type PolicyWeights struct {
@@ -150,9 +152,11 @@ func mergeDefaults(in StoreFile) StoreFile {
 	if out.Settings.Proxy.Listen == "" {
 		out.Settings.Proxy.Listen = def.Settings.Proxy.Listen
 	}
+	out.Settings.Proxy.Name = strings.TrimSpace(out.Settings.Proxy.Name)
 	if out.Settings.Proxy.UpstreamBaseURL == "" {
 		out.Settings.Proxy.UpstreamBaseURL = def.Settings.Proxy.UpstreamBaseURL
 	}
+	out.Settings.Proxy.ChildProxyURLs = normalizeProxyURLList(out.Settings.Proxy.ChildProxyURLs)
 	if out.Settings.Proxy.MaxAttempts <= 0 {
 		out.Settings.Proxy.MaxAttempts = def.Settings.Proxy.MaxAttempts
 	}
@@ -207,6 +211,30 @@ func mergeDefaults(in StoreFile) StoreFile {
 			// Keep disabled state if explicitly disabled in older versions.
 			out.Accounts[i].Enabled = true
 		}
+	}
+	return out
+}
+
+func normalizeProxyURLList(urls []string) []string {
+	if len(urls) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(urls))
+	seen := make(map[string]struct{}, len(urls))
+	for _, raw := range urls {
+		url := strings.TrimRight(strings.TrimSpace(raw), "/")
+		if url == "" {
+			continue
+		}
+		if _, ok := seen[url]; ok {
+			continue
+		}
+		seen[url] = struct{}{}
+		out = append(out, url)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

@@ -28,16 +28,23 @@ func TestRuntimeSettingsOverridesAreEphemeral(t *testing.T) {
 	}
 
 	listen := "127.0.0.1:9999"
+	name := "edge-env"
 	upstream := "https://alt.example/backend-api"
+	childProxyURLs := []string{"http://child-a.internal/", " http://child-b.internal/base "}
 	overrides := RuntimeSettingsOverrides{
+		ProxyName:       &name,
 		Listen:          &listen,
 		UpstreamBaseURL: &upstream,
+		ChildProxyURLs:  &childProxyURLs,
 	}
 	store.SetRuntimeSettingsOverrides(overrides)
 
 	snap := store.Snapshot()
 	if snap.Settings.Proxy.Listen != listen {
 		t.Fatalf("listen override not applied: got %q want %q", snap.Settings.Proxy.Listen, listen)
+	}
+	if snap.Settings.Proxy.Name != name {
+		t.Fatalf("proxy name override not applied: got %q want %q", snap.Settings.Proxy.Name, name)
 	}
 	if snap.Settings.Proxy.UpstreamBaseURL != upstream {
 		t.Fatalf("upstream override not applied: got %q want %q", snap.Settings.Proxy.UpstreamBaseURL, upstream)
@@ -48,6 +55,9 @@ func TestRuntimeSettingsOverridesAreEphemeral(t *testing.T) {
 	if snap.Accounts[1].BaseURL != "https://custom.example/backend-api" {
 		t.Fatalf("unexpected override for custom account base URL: got %q", snap.Accounts[1].BaseURL)
 	}
+	if got := snap.Settings.Proxy.ChildProxyURLs; len(got) != 2 || got[0] != "http://child-a.internal" || got[1] != "http://child-b.internal/base" {
+		t.Fatalf("child proxy override not applied: %#v", got)
+	}
 
 	reopened, err := OpenStore(root)
 	if err != nil {
@@ -57,8 +67,14 @@ func TestRuntimeSettingsOverridesAreEphemeral(t *testing.T) {
 	if persisted.Settings.Proxy.Listen == listen {
 		t.Fatalf("listen override persisted unexpectedly: %q", persisted.Settings.Proxy.Listen)
 	}
+	if persisted.Settings.Proxy.Name == name {
+		t.Fatalf("proxy name override persisted unexpectedly: %q", persisted.Settings.Proxy.Name)
+	}
 	if persisted.Settings.Proxy.UpstreamBaseURL == upstream {
 		t.Fatalf("upstream override persisted unexpectedly: %q", persisted.Settings.Proxy.UpstreamBaseURL)
+	}
+	if len(persisted.Settings.Proxy.ChildProxyURLs) != 0 {
+		t.Fatalf("child proxy override persisted unexpectedly: %#v", persisted.Settings.Proxy.ChildProxyURLs)
 	}
 }
 

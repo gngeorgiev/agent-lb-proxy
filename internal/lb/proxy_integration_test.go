@@ -1015,6 +1015,285 @@ func TestProxyReloadedPolicyAppliesWithoutRestart(t *testing.T) {
 	}
 }
 
+func TestProxyRoutesViaChildProxyByUsage(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	var mu sync.Mutex
+	hits := []string{}
+	newChild := func(name string, score float64) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/status":
+				_ = json.NewEncoder(w).Encode(ProxyStatus{
+					ProxyName:       "child-" + name,
+					GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+					SelectionReason: "usage-stay",
+					Accounts: []AccountStatus{
+						{ProxyName: "child-" + name, Alias: name, ID: name, Active: true, Healthy: true, Enabled: true, Score: score},
+					},
+				})
+			case "/responses":
+				mu.Lock()
+				hits = append(hits, name)
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"child":"`+name+`"}`)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+	}
+
+	childA := newChild("a", 0.20)
+	defer childA.Close()
+	childB := newChild("b", 0.90)
+	defer childB.Close()
+
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Settings.Policy.Mode = PolicyUsageBalanced
+		sf.Settings.Proxy.MaxAttempts = 2
+		sf.Settings.Proxy.ChildProxyURLs = []string{childA.URL, childB.URL}
+		sf.Accounts = nil
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	mainProxy := httptest.NewServer(NewProxyServer(store, nil, nil))
+	defer mainProxy.Close()
+
+	resp, err := http.Post(mainProxy.URL+"/responses", "application/json", bytes.NewBufferString(`{"input":"hi"}`))
+	if err != nil {
+		t.Fatalf("post to main proxy: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, string(body))
+	}
+	if !strings.Contains(string(body), `"child":"b"`) {
+		t.Fatalf("expected request to route to child b, got body=%s", string(body))
+	}
+
+	statusResp, err := http.Get(mainProxy.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status: %v", err)
+	}
+	defer statusResp.Body.Close()
+	var status ProxyStatus
+	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if status.SelectedProxyURL != childB.URL {
+		t.Fatalf("expected selected proxy %q, got %q", childB.URL, status.SelectedProxyURL)
+	}
+	found := false
+	for _, account := range status.Accounts {
+		if account.ID == "b" && account.ProxyName == "child-b" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected aggregated account from child-b, got %+v", status.Accounts)
+	}
+	if len(status.ChildProxies) != 2 {
+		t.Fatalf("expected 2 child proxies in status, got %d", len(status.ChildProxies))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hits) != 1 || hits[0] != "b" {
+		t.Fatalf("unexpected child hits: %v", hits)
+	}
+}
+
+func TestProxyFailsOverAcrossChildProxies(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	var mu sync.Mutex
+	order := []string{}
+	newChild := func(name string, score float64, statusCode int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/status":
+				_ = json.NewEncoder(w).Encode(ProxyStatus{
+					ProxyName:       "child-" + name,
+					GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+					SelectionReason: "usage-stay",
+					Accounts: []AccountStatus{
+						{ProxyName: "child-" + name, Alias: name, ID: name, Active: true, Healthy: true, Enabled: true, Score: score},
+					},
+				})
+			case "/responses":
+				mu.Lock()
+				order = append(order, name)
+				mu.Unlock()
+				if statusCode == http.StatusTooManyRequests {
+					w.Header().Set("Retry-After", "1")
+				}
+				w.WriteHeader(statusCode)
+				_, _ = io.WriteString(w, `{"child":"`+name+`"}`)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+	}
+
+	childA := newChild("a", 0.95, http.StatusTooManyRequests)
+	defer childA.Close()
+	childB := newChild("b", 0.80, http.StatusOK)
+	defer childB.Close()
+
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Settings.Policy.Mode = PolicyUsageBalanced
+		sf.Settings.Proxy.MaxAttempts = 3
+		sf.Settings.Proxy.ChildProxyURLs = []string{childA.URL, childB.URL}
+		sf.Accounts = nil
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	mainProxy := httptest.NewServer(NewProxyServer(store, nil, nil))
+	defer mainProxy.Close()
+
+	resp, err := http.Post(mainProxy.URL+"/responses", "application/json", bytes.NewBufferString(`{"input":"hi"}`))
+	if err != nil {
+		t.Fatalf("post to main proxy: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, string(body))
+	}
+	if !strings.Contains(string(body), `"child":"b"`) {
+		t.Fatalf("expected failover to child b, got body=%s", string(body))
+	}
+
+	mu.Lock()
+	if len(order) != 2 || order[0] != "a" || order[1] != "b" {
+		t.Fatalf("unexpected child request order: %v", order)
+	}
+	mu.Unlock()
+
+	statusResp, err := http.Get(mainProxy.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status: %v", err)
+	}
+	defer statusResp.Body.Close()
+	var status ProxyStatus
+	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if len(status.ChildProxies) != 2 {
+		t.Fatalf("expected 2 child proxies in status, got %d", len(status.ChildProxies))
+	}
+	if status.ChildProxies[0].CooldownSeconds <= 0 {
+		t.Fatalf("expected first child proxy to be in cooldown, got %+v", status.ChildProxies[0])
+	}
+}
+
+func TestProxyChainsChildProxiesRecursively(t *testing.T) {
+	t.Parallel()
+
+	grandchild := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			_ = json.NewEncoder(w).Encode(ProxyStatus{
+				ProxyName:       "grandchild",
+				GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+				SelectionReason: "usage-stay",
+				Accounts: []AccountStatus{
+					{ProxyName: "grandchild", Alias: "leaf", ID: "leaf", Active: true, Healthy: true, Enabled: true, Score: 0.95},
+				},
+			})
+		case "/responses":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"hop":"grandchild"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer grandchild.Close()
+
+	childRoot := t.TempDir()
+	childStore, err := OpenStore(childRoot)
+	if err != nil {
+		t.Fatalf("OpenStore child: %v", err)
+	}
+	if err := childStore.Update(func(sf *StoreFile) error {
+		sf.Settings.Proxy.Name = "child"
+		sf.Settings.Policy.Mode = PolicyUsageBalanced
+		sf.Settings.Proxy.ChildProxyURLs = []string{grandchild.URL}
+		sf.Accounts = nil
+		return nil
+	}); err != nil {
+		t.Fatalf("child store update: %v", err)
+	}
+	childProxy := httptest.NewServer(NewProxyServer(childStore, nil, nil))
+	defer childProxy.Close()
+
+	mainRoot := t.TempDir()
+	mainStore, err := OpenStore(mainRoot)
+	if err != nil {
+		t.Fatalf("OpenStore main: %v", err)
+	}
+	if err := mainStore.Update(func(sf *StoreFile) error {
+		sf.Settings.Proxy.Name = "main"
+		sf.Settings.Policy.Mode = PolicyUsageBalanced
+		sf.Settings.Proxy.ChildProxyURLs = []string{childProxy.URL}
+		sf.Accounts = nil
+		return nil
+	}); err != nil {
+		t.Fatalf("main store update: %v", err)
+	}
+	mainProxy := httptest.NewServer(NewProxyServer(mainStore, nil, nil))
+	defer mainProxy.Close()
+
+	resp, err := http.Post(mainProxy.URL+"/responses", "application/json", bytes.NewBufferString(`{"input":"hi"}`))
+	if err != nil {
+		t.Fatalf("post to main proxy: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, string(body))
+	}
+	if !strings.Contains(string(body), `"hop":"grandchild"`) {
+		t.Fatalf("expected recursive chain to reach grandchild, got body=%s", string(body))
+	}
+
+	statusResp, err := http.Get(mainProxy.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status: %v", err)
+	}
+	defer statusResp.Body.Close()
+	var status ProxyStatus
+	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	foundLeaf := false
+	for _, account := range status.Accounts {
+		if account.ID == "leaf" && account.ProxyName == "grandchild" {
+			foundLeaf = true
+		}
+	}
+	if !foundLeaf {
+		t.Fatalf("expected recursive status to include grandchild account origin, got %+v", status.Accounts)
+	}
+}
+
 func writeAuthFile(t *testing.T, home, accessToken, accountID string) {
 	t.Helper()
 	if err := os.MkdirAll(home, 0o700); err != nil {

@@ -22,8 +22,10 @@ type Store struct {
 }
 
 type RuntimeSettingsOverrides struct {
+	ProxyName               *string
 	Listen                  *string
 	UpstreamBaseURL         *string
+	ChildProxyURLs          *[]string
 	MaxAttempts             *int
 	UsageTimeoutMS          *int
 	CooldownDefaultSeconds  *int
@@ -217,13 +219,14 @@ func writeJSONAtomic(path string, v any) error {
 func cloneStore(in StoreFile) StoreFile {
 	out := in
 	out.Accounts = append([]Account(nil), in.Accounts...)
+	out.Settings.Proxy.ChildProxyURLs = append([]string(nil), in.Settings.Proxy.ChildProxyURLs...)
 	out.Settings.Commands.Login = append([]string(nil), in.Settings.Commands.Login...)
 	out.Settings.Commands.Run = append([]string(nil), in.Settings.Commands.Run...)
 	return out
 }
 
 func settingsEqual(a, b Settings) bool {
-	if a.Proxy != b.Proxy || a.Policy != b.Policy || a.Quota != b.Quota || a.Run != b.Run {
+	if !proxyConfigEqual(a.Proxy, b.Proxy) || a.Policy != b.Policy || a.Quota != b.Quota || a.Run != b.Run {
 		return false
 	}
 	if !slices.Equal(a.Commands.Login, b.Commands.Login) {
@@ -233,6 +236,18 @@ func settingsEqual(a, b Settings) bool {
 		return false
 	}
 	return true
+}
+
+func proxyConfigEqual(a, b ProxyConfig) bool {
+	if a.Name != b.Name ||
+		a.Listen != b.Listen ||
+		a.UpstreamBaseURL != b.UpstreamBaseURL ||
+		a.MaxAttempts != b.MaxAttempts ||
+		a.UsageTimeoutMS != b.UsageTimeoutMS ||
+		a.CooldownDefaultS != b.CooldownDefaultS {
+		return false
+	}
+	return slices.Equal(a.ChildProxyURLs, b.ChildProxyURLs)
 }
 
 func (s *Store) UpsertAccount(account Account) error {
@@ -283,6 +298,9 @@ func max(a, b int) int {
 }
 
 func applyRuntimeOverrides(sf *StoreFile, overrides RuntimeSettingsOverrides) {
+	if overrides.ProxyName != nil {
+		sf.Settings.Proxy.Name = strings.TrimSpace(*overrides.ProxyName)
+	}
 	if overrides.Listen != nil {
 		sf.Settings.Proxy.Listen = *overrides.Listen
 	}
@@ -294,6 +312,9 @@ func applyRuntimeOverrides(sf *StoreFile, overrides RuntimeSettingsOverrides) {
 				sf.Accounts[i].BaseURL = sf.Settings.Proxy.UpstreamBaseURL
 			}
 		}
+	}
+	if overrides.ChildProxyURLs != nil {
+		sf.Settings.Proxy.ChildProxyURLs = normalizeProxyURLList(*overrides.ChildProxyURLs)
 	}
 	if overrides.MaxAttempts != nil {
 		sf.Settings.Proxy.MaxAttempts = *overrides.MaxAttempts

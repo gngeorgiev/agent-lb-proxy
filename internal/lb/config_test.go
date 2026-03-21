@@ -29,6 +29,9 @@ func TestOpenStoreCreatesConfigToml(t *testing.T) {
 	if !strings.Contains(text, "upstream_base_url") {
 		t.Fatalf("expected upstream_base_url in config.toml: %s", text)
 	}
+	if !strings.Contains(text, "name = ") {
+		t.Fatalf("expected proxy name in config.toml: %s", text)
+	}
 	if !strings.Contains(text, "[commands]") {
 		t.Fatalf("expected [commands] section in config.toml: %s", text)
 	}
@@ -42,7 +45,9 @@ func TestOpenStoreLoadsConfigTomlValues(t *testing.T) {
 	}
 	custom := `
 [proxy]
+name = "edge-a"
 listen = "127.0.0.1:9999"
+child_proxy_urls = ["http://child-a.internal/", " http://child-b.internal/base "]
 max_attempts = 7
 usage_timeout_ms = 1234
 cooldown_default_seconds = 9
@@ -81,8 +86,14 @@ inherit_shell = false
 	if snap.Settings.Proxy.Listen != "127.0.0.1:9999" {
 		t.Fatalf("listen not loaded from config: %s", snap.Settings.Proxy.Listen)
 	}
+	if snap.Settings.Proxy.Name != "edge-a" {
+		t.Fatalf("proxy name not loaded from config: %s", snap.Settings.Proxy.Name)
+	}
 	if snap.Settings.Proxy.MaxAttempts != 7 {
 		t.Fatalf("max_attempts not loaded: %d", snap.Settings.Proxy.MaxAttempts)
+	}
+	if got := snap.Settings.Proxy.ChildProxyURLs; len(got) != 2 || got[0] != "http://child-a.internal" || got[1] != "http://child-b.internal/base" {
+		t.Fatalf("child_proxy_urls not normalized: %#v", got)
 	}
 	if snap.Settings.Policy.Mode != PolicySticky {
 		t.Fatalf("policy mode not loaded: %s", snap.Settings.Policy.Mode)
@@ -171,5 +182,31 @@ proxy_url = "http://legacy-proxy.local"
 	}
 	if got := store.Snapshot().Settings.ProxyURL; got != "http://legacy-proxy.local" {
 		t.Fatalf("expected legacy run.proxy_url to be loaded, got %q", got)
+	}
+}
+
+func TestOpenStoreGeneratesAndPersistsProxyNameWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "config.toml"), []byte("[proxy]\nlisten = \"127.0.0.1:8765\"\n"), 0o600); err != nil {
+		t.Fatalf("write config.toml: %v", err)
+	}
+
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	first := store.Snapshot().Settings.Proxy.Name
+	if first == "" {
+		t.Fatal("expected generated proxy name")
+	}
+
+	reopened, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	if got := reopened.Snapshot().Settings.Proxy.Name; got != first {
+		t.Fatalf("expected proxy name to persist, got %q want %q", got, first)
 	}
 }

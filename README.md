@@ -9,6 +9,7 @@ It lets you run Codex through a local proxy that can switch between multiple aut
 - Multi-account enrollment (`auth.json` per alias)
 - Dockerized browser login flow for importing host Codex credentials
 - Per-request account selection (`usage_balanced`, `sticky`, `round_robin`)
+- Recursive proxy chaining across child `codexlb` instances
 - Automatic failover/cooldown on `429` and `5xx`
 - Automatic disable on auth errors (`401`, `403`)
 - Wrapper execution via local proxy (`OPENAI_BASE_URL`)
@@ -121,6 +122,8 @@ CLI environment overrides:
 
 - `CODEXLB_ROOT` sets the default `--root` for commands that operate on the local store.
 - `CODEXLB_PROXY_URL` sets the default `--proxy-url` for commands that talk to a proxy or remote admin API.
+- `CODEXLB_PROXY_NAME` overrides `proxy.name` for the running proxy process.
+- `CODEXLB_CHILD_PROXY_URLS` overrides `proxy.child_proxy_urls` for the running proxy process.
 
 ## Paths
 
@@ -143,8 +146,13 @@ This file is the source of truth for settings.
 
 ```toml
 [proxy]
+name = "proxy-a"
 listen = "127.0.0.1:8765"
 upstream_base_url = "https://chatgpt.com/backend-api"
+# Optional: route through other codexlb proxies instead of local accounts.
+# Child proxies receive the original request path unchanged, and can themselves
+# chain to more child proxies without a hard depth limit.
+child_proxy_urls = []
 # Global default URL used by commands that talk to the proxy
 # (`run`, `status`, and `proxy logs`) when --proxy-url is not provided.
 # If empty, falls back to "http://<proxy.listen>".
@@ -179,11 +187,16 @@ run = ["exec", "--yolo"]
 inherit_shell = true
 ```
 
+If `proxy.name` is omitted, `codexlb` generates a random stable name on first load and writes it back into `config.toml`.
+
 Hot reload behavior:
 
 - Proxy polls `config.toml` and reloads updates automatically (default: every 1s)
 - `proxy.listen` changes are detected but require proxy restart to take effect
+- `proxy.child_proxy_urls` changes apply without restart
 - CLI flags on `codexlb proxy` override settings for that process only (not persisted)
+
+When `proxy.child_proxy_urls` is non-empty, the proxy selects among those child proxies with the same policy (`usage_balanced`, `sticky`, `round_robin`) it normally uses for local accounts. This makes chained proxies opaque to clients: consumers still talk only to the top-level proxy. `codexlb status` includes the proxy name for each account so you can see which proxy in the chain owns it.
 
 ## Account Selection Algorithm
 
@@ -224,6 +237,8 @@ Per request attempt (up to `proxy.max_attempts`):
 - transport error: default cooldown, then retry
 
 After attempts are exhausted, proxy returns last upstream response (or `503`).
+
+For chained proxies, the same retry loop applies at the child-proxy layer. Child proxy selection is driven by each child proxy's `/status` response, so multi-hop chains keep working recursively.
 
 ## CLI Reference
 
@@ -381,6 +396,8 @@ For local CLI overrides without repeating flags:
 ```bash
 export CODEXLB_ROOT=/path/to/state
 export CODEXLB_PROXY_URL=http://127.0.0.1:9000
+export CODEXLB_PROXY_NAME=edge-main
+export CODEXLB_CHILD_PROXY_URLS=http://10.0.0.11:8765,http://10.0.0.12:8765
 ```
 
 These act as defaults for `--root` and `--proxy-url`. An explicit flag still wins over the environment.

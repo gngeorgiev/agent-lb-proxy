@@ -17,13 +17,14 @@ import (
 
 func TestStatusCommandPrintsTable(t *testing.T) {
 	status := lb.ProxyStatus{
+		ProxyName:         "main",
 		GeneratedAt:       time.Now().UTC().Format(time.RFC3339),
 		Policy:            lb.PolicyConfig{Mode: lb.PolicyUsageBalanced},
 		SelectedAccountID: "openai:alice",
 		State:             lb.RuntimeState{PinnedAccountID: "openai:alice"},
 		SelectionReason:   "usage-stay",
 		Accounts: []lb.AccountStatus{
-			{Alias: "alice", ID: "openai:alice", Email: "a@example.com", Active: true, Healthy: true, Enabled: true, DailyLeftPct: 80, DailyResetAt: 1710000000, WeeklyLeftPct: 70, WeeklyResetAt: 1710600000, Score: 0.75},
+			{ProxyName: "main", Alias: "alice", ID: "openai:alice", Email: "a@example.com", Active: true, Healthy: true, Enabled: true, DailyLeftPct: 80, DailyResetAt: 1710000000, WeeklyLeftPct: 70, WeeklyResetAt: 1710600000, Score: 0.75},
 		},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,10 +45,13 @@ func TestStatusCommandPrintsTable(t *testing.T) {
 	if !strings.Contains(out, "policy=usage_balanced") {
 		t.Fatalf("expected policy line in output: %s", out)
 	}
+	if !strings.Contains(out, "proxy=main") {
+		t.Fatalf("expected proxy name in output: %s", out)
+	}
 	if !strings.Contains(out, "pinned=alice") {
 		t.Fatalf("expected pinned alias in output: %s", out)
 	}
-	if !regexp.MustCompile(`(?m)^\*\s+P\s+alice\s+openai:alice`).MatchString(out) {
+	if !regexp.MustCompile(`(?m)^\*\s+P\s+main\s+alice\s+openai:alice`).MatchString(out) {
 		t.Fatalf("expected pinned marker in account row: %s", out)
 	}
 	if !strings.Contains(out, "alice") {
@@ -81,11 +85,12 @@ func TestStatusCommandJSON(t *testing.T) {
 
 func TestStatusCommandShort(t *testing.T) {
 	status := lb.ProxyStatus{
+		ProxyName:       "main",
 		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
 		Policy:          lb.PolicyConfig{Mode: lb.PolicyUsageBalanced},
 		SelectionReason: "usage-stay",
 		Accounts: []lb.AccountStatus{
-			{Alias: "alice", ID: "openai:alice", Active: true},
+			{ProxyName: "main", Alias: "alice", ID: "openai:alice", Active: true},
 		},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +107,81 @@ func TestStatusCommandShort(t *testing.T) {
 	line := strings.TrimSpace(out)
 	if line != "lb=alice reason=usage-stay mode=usage_balanced" {
 		t.Fatalf("unexpected short status line: %q", line)
+	}
+}
+
+func TestStatusCommandShortUsesActiveChildProxy(t *testing.T) {
+	status := lb.ProxyStatus{
+		ProxyName:       "main",
+		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+		Policy:          lb.PolicyConfig{Mode: lb.PolicyUsageBalanced},
+		SelectionReason: "usage-stay",
+		ChildProxies: []lb.ChildProxyStatus{
+			{Name: "child-b", URL: "http://child-b.internal", Active: true, Healthy: true, Reachable: true, Score: 0.9},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(status)
+	}))
+	defer server.Close()
+
+	out, code := captureStdout(func() int {
+		return run([]string{"status", "--root", t.TempDir(), "--proxy-url", server.URL, "--short"})
+	})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d output=%s", code, out)
+	}
+	line := strings.TrimSpace(out)
+	if line != "lb=child-b reason=usage-stay mode=usage_balanced" {
+		t.Fatalf("unexpected short status line: %q", line)
+	}
+}
+
+func TestStatusCommandPrintsChildProxyTable(t *testing.T) {
+	status := lb.ProxyStatus{
+		ProxyName:        "main",
+		GeneratedAt:      time.Now().UTC().Format(time.RFC3339),
+		Policy:           lb.PolicyConfig{Mode: lb.PolicyUsageBalanced},
+		SelectedProxyURL: "http://child-b.internal",
+		SelectionReason:  "usage-stay",
+		Accounts: []lb.AccountStatus{
+			{ProxyName: "child-b", Alias: "bob", ID: "openai:bob", Active: true, Healthy: true, Enabled: true, Score: 0.9},
+		},
+		ChildProxies: []lb.ChildProxyStatus{
+			{
+				Name:            "child-b",
+				URL:             "http://child-b.internal",
+				Active:          true,
+				Healthy:         true,
+				Reachable:       true,
+				Score:           0.9,
+				SelectedTarget:  "openai:bob",
+				SelectionReason: "usage-stay",
+			},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(status)
+	}))
+	defer server.Close()
+
+	out, code := captureStdout(func() int {
+		return run([]string{"status", "--root", t.TempDir(), "--proxy-url", server.URL})
+	})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d output=%s", code, out)
+	}
+	if !strings.Contains(out, "selected=http://child-b.internal") {
+		t.Fatalf("expected selected child proxy in output: %s", out)
+	}
+	if !strings.Contains(out, "child-b") {
+		t.Fatalf("expected child proxy name in output: %s", out)
+	}
+	if !strings.Contains(out, "http://child-b.internal") {
+		t.Fatalf("expected child proxy row in output: %s", out)
+	}
+	if !strings.Contains(out, "openai:bob") {
+		t.Fatalf("expected child selected target in output: %s", out)
 	}
 }
 
@@ -199,6 +279,16 @@ func TestStatusCommandUsesCODEXLBRoot(t *testing.T) {
 	})
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
+	}
+}
+
+func TestParseProxyURLListEnv(t *testing.T) {
+	got := parseProxyURLListEnv(" http://child-a.internal/,\nhttp://child-b.internal/base  http://child-a.internal/ ")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 child proxy urls, got %#v", got)
+	}
+	if got[0] != "http://child-a.internal" || got[1] != "http://child-b.internal/base" {
+		t.Fatalf("unexpected parsed urls: %#v", got)
 	}
 }
 

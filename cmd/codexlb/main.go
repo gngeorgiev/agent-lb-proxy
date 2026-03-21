@@ -95,6 +95,10 @@ Examples:
   codexlb proxy
   codexlb proxy --listen 127.0.0.1:8765 --upstream https://chatgpt.com/backend-api
   codexlb proxy --max-attempts 4 --quota-refresh-minutes 5
+
+Environment:
+  CODEXLB_PROXY_NAME        proxy name override for the running proxy
+  CODEXLB_CHILD_PROXY_URLS   comma/newline/space-separated child proxy URLs
 `)
 	}
 	if err := fs.Parse(argv); err != nil {
@@ -108,6 +112,10 @@ Examples:
 	}
 
 	overrides := lb.RuntimeSettingsOverrides{}
+	if proxyName := strings.TrimSpace(os.Getenv("CODEXLB_PROXY_NAME")); proxyName != "" {
+		overrides.ProxyName = &proxyName
+	}
+	childProxyURLs := parseProxyURLListEnv(os.Getenv("CODEXLB_CHILD_PROXY_URLS"))
 	if *listen != "" || *upstream != "" || *maxAttempts > 0 || *usageTimeoutMS > 0 || *cooldownDefaultSeconds > 0 || *quotaRefreshMinutes > 0 || *quotaRefreshMessages > 0 || *quotaCacheTTLMinutes > 0 {
 		if *listen != "" {
 			overrides.Listen = listen
@@ -134,6 +142,11 @@ Examples:
 		if *quotaCacheTTLMinutes > 0 {
 			overrides.CacheTTLMinutes = quotaCacheTTLMinutes
 		}
+	}
+	if len(childProxyURLs) > 0 {
+		overrides.ChildProxyURLs = &childProxyURLs
+	}
+	if overrides.ProxyName != nil || overrides.Listen != nil || overrides.UpstreamBaseURL != nil || overrides.ChildProxyURLs != nil || overrides.MaxAttempts != nil || overrides.UsageTimeoutMS != nil || overrides.CooldownDefaultSeconds != nil || overrides.RefreshIntervalMinutes != nil || overrides.RefreshIntervalMessages != nil || overrides.CacheTTLMinutes != nil {
 		store.SetRuntimeSettingsOverrides(overrides)
 	}
 
@@ -155,10 +168,11 @@ Examples:
 	}
 
 	logFile := fmt.Sprintf("%s/logs/proxy.current.jsonl", store.RootDir())
-	fmt.Printf("codexlb proxy listening on http://%s (upstream=%s, logs=%s)\n", snapshot.Settings.Proxy.Listen, snapshot.Settings.Proxy.UpstreamBaseURL, logFile)
+	fmt.Printf("codexlb proxy %s listening on http://%s (upstream=%s, logs=%s)\n", snapshot.Settings.Proxy.Name, snapshot.Settings.Proxy.Listen, snapshot.Settings.Proxy.UpstreamBaseURL, logFile)
 	events.Log("proxy.started", map[string]any{
-		"listen":   snapshot.Settings.Proxy.Listen,
-		"upstream": snapshot.Settings.Proxy.UpstreamBaseURL,
+		"proxy_name": snapshot.Settings.Proxy.Name,
+		"listen":     snapshot.Settings.Proxy.Listen,
+		"upstream":   snapshot.Settings.Proxy.UpstreamBaseURL,
 	})
 
 	errCh := make(chan error, 1)
@@ -1038,9 +1052,17 @@ func resolveProxyURL(store *lb.Store, proxyURL string) string {
 func printStatusShort(status lb.ProxyStatus) {
 	active := "none"
 	for _, a := range status.Accounts {
-		if a.Active {
+		if a.Active && a.ProxyName == status.ProxyName {
 			active = a.Alias
 			break
+		}
+	}
+	if active == "none" {
+		for _, child := range status.ChildProxies {
+			if child.Active {
+				active = child.Name
+				break
+			}
 		}
 	}
 	reason := noneIfEmpty(status.SelectionReason)
@@ -1050,9 +1072,13 @@ func printStatusShort(status lb.ProxyStatus) {
 
 func printStatusTable(status lb.ProxyStatus) {
 	pinnedAlias := pinnedAliasForStatus(status)
-	fmt.Printf("policy=%s selected=%s pinned=%s reason=%s generated_at=%s\n", status.Policy.Mode, noneIfEmpty(status.SelectedAccountID), noneIfEmpty(pinnedAlias), noneIfEmpty(status.SelectionReason), status.GeneratedAt)
+	selected := status.SelectedAccountID
+	if selected == "" {
+		selected = status.SelectedProxyURL
+	}
+	fmt.Printf("proxy=%s policy=%s selected=%s pinned=%s reason=%s generated_at=%s\n", noneIfEmpty(status.ProxyName), status.Policy.Mode, noneIfEmpty(selected), noneIfEmpty(pinnedAlias), noneIfEmpty(status.SelectionReason), status.GeneratedAt)
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ACTIVE\tPIN\tALIAS\tID\tEMAIL\tSTATUS\tDAILY_LEFT\tDAILY_RESET\tWEEKLY_LEFT\tWEEKLY_RESET\tSCORE\tLAST_SWITCH\tQUOTA")
+	_, _ = fmt.Fprintln(w, "ACTIVE\tPIN\tPROXY\tALIAS\tID\tEMAIL\tSTATUS\tDAILY_LEFT\tDAILY_RESET\tWEEKLY_LEFT\tWEEKLY_RESET\tSCORE\tLAST_SWITCH\tQUOTA")
 	pinnedID := strings.TrimSpace(status.State.PinnedAccountID)
 	for _, a := range status.Accounts {
 		active := ""
@@ -1097,10 +1123,44 @@ func printStatusTable(status lb.ProxyStatus) {
 		if a.QuotaSource != "" {
 			quota = a.QuotaSource
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.3f\t%s\t%s\n",
-			active, pin, a.Alias, a.ID, email, state, daily, dailyReset, weekly, weeklyReset, a.Score, lastSwitch, quota)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.3f\t%s\t%s\n",
+			active, pin, noneIfEmpty(a.ProxyName), a.Alias, a.ID, email, state, daily, dailyReset, weekly, weeklyReset, a.Score, lastSwitch, quota)
 	}
 	_ = w.Flush()
+
+	if len(status.ChildProxies) == 0 {
+		return
+	}
+
+	fmt.Println()
+	childWriter := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(childWriter, "ACTIVE\tNAME\tURL\tSTATUS\tSCORE\tSELECTED\tREASON\tLAST_SWITCH\tERROR")
+	for _, child := range status.ChildProxies {
+		active := ""
+		if child.Active {
+			active = "*"
+		}
+		state := "ready"
+		if !child.Reachable {
+			state = "unreachable"
+		} else if child.CooldownSeconds > 0 {
+			state = fmt.Sprintf("cooldown(%ds)", child.CooldownSeconds)
+		} else if !child.Healthy {
+			state = "unhealthy"
+		}
+		_, _ = fmt.Fprintf(childWriter, "%s\t%s\t%s\t%s\t%.3f\t%s\t%s\t%s\t%s\n",
+			active,
+			noneIfEmpty(child.Name),
+			child.URL,
+			state,
+			child.Score,
+			noneIfEmpty(child.SelectedTarget),
+			noneIfEmpty(child.SelectionReason),
+			noneIfEmpty(child.LastSwitchReason),
+			noneIfEmpty(child.LastError),
+		)
+	}
+	_ = childWriter.Flush()
 }
 
 func formatStatusResetAt(ts int64) string {
@@ -1401,6 +1461,39 @@ Run 'codexlb <command> --help' for detailed flags and examples.
 Environment:
   CODEXLB_ROOT       default state directory used by --root
   CODEXLB_PROXY_URL  default proxy/admin URL used by --proxy-url
-  CODEXLB_CODEX_BIN   default codex binary used by account login/run
+  CODEXLB_CODEX_BIN  default codex binary used by account login/run
+  CODEXLB_PROXY_NAME  proxy name override for the running proxy
+  CODEXLB_CHILD_PROXY_URLS  default child proxy URLs for proxy chaining
 `)
+}
+
+func parseProxyURLListEnv(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		switch r {
+		case ',', '\n', '\r', '\t', ' ':
+			return true
+		default:
+			return false
+		}
+	})
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		url := strings.TrimRight(strings.TrimSpace(part), "/")
+		if url == "" {
+			continue
+		}
+		if _, ok := seen[url]; ok {
+			continue
+		}
+		seen[url] = struct{}{}
+		out = append(out, url)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
