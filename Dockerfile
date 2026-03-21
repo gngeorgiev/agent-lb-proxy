@@ -22,7 +22,10 @@ RUN set -eux; \
 
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates
+ARG CODEX_NPM_VERSION=latest
+
+RUN apk add --no-cache ca-certificates nodejs npm \
+	&& npm install -g "@openai/codex@${CODEX_NPM_VERSION}"
 
 COPY --from=builder /out/codexlb /usr/local/bin/codexlb
 

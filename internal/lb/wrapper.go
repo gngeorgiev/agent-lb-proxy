@@ -232,9 +232,6 @@ func seedRuntimeAuthIfMissing(store *Store, codexHome, proxyURL string) error {
 	}
 
 	snapshot := store.Snapshot()
-	if err := syncRuntimeConfig(snapshot, codexHome); err != nil {
-		return err
-	}
 	if len(snapshot.Accounts) > 0 {
 		candidates := runtimeAuthCandidateIndexes(snapshot, time.Now().UnixMilli())
 
@@ -252,32 +249,69 @@ func seedRuntimeAuthIfMissing(store *Store, codexHome, proxyURL string) error {
 			if err := os.WriteFile(targetAuth, normalizedAuth, 0o600); err != nil {
 				return fmt.Errorf("seed runtime auth.json from account %s: %w", snapshot.Accounts[idx].Alias, err)
 			}
+			if err := syncRuntimeConfigForAccount(snapshot, idx, codexHome); err != nil {
+				return err
+			}
 			return nil
 		}
 	}
 
 	if remoteAuth, err := fetchRemoteRuntimeAuth(proxyURL); err == nil {
-		normalizedAuth, err := normalizeRuntimeAuthPayload(remoteAuth, "")
+		normalizedAuth, err := normalizeRuntimeAuthPayload(remoteAuth.Auth, "")
 		if err != nil {
 			return fmt.Errorf("normalize runtime auth from remote proxy: %w", err)
 		}
 		if err := os.WriteFile(targetAuth, normalizedAuth, 0o600); err != nil {
 			return fmt.Errorf("seed runtime auth.json from remote proxy: %w", err)
 		}
+		if err := syncRuntimeConfigFromRemote(remoteAuth, codexHome); err != nil {
+			return err
+		}
 		return nil
 	}
 
+	if err := syncDefaultRuntimeConfig(codexHome); err != nil {
+		return err
+	}
 	if err := writeProxyOnlyRuntimeAuth(targetAuth); err != nil {
 		return fmt.Errorf("write proxy-only runtime auth.json: %w", err)
 	}
 	return nil
 }
 
-func syncRuntimeConfig(snapshot StoreFile, codexHome string) error {
-	sourceConfig, sourceDesc := runtimeConfigSource(snapshot, codexHome)
-	if sourceConfig == "" {
+func syncRuntimeConfigForAccount(snapshot StoreFile, accountIdx int, codexHome string) error {
+	if accountIdx >= 0 && accountIdx < len(snapshot.Accounts) {
+		sourceConfig := filepath.Join(snapshot.Accounts[accountIdx].HomeDir, "config.toml")
+		if isRegularFile(sourceConfig) {
+			return copyRuntimeConfigFile(sourceConfig, codexHome, fmt.Sprintf("account %s", snapshot.Accounts[accountIdx].Alias))
+		}
+	}
+	return syncDefaultRuntimeConfig(codexHome)
+}
+
+func syncRuntimeConfigFromRemote(runtimeAuth AdminRuntimeAuthResponse, codexHome string) error {
+	if strings.TrimSpace(runtimeAuth.Config) != "" {
+		targetConfig := filepath.Join(codexHome, "config.toml")
+		if err := os.WriteFile(targetConfig, []byte(runtimeAuth.Config), 0o600); err != nil {
+			sourceDesc := "remote runtime auth"
+			if runtimeAuth.SourceAlias != "" {
+				sourceDesc = fmt.Sprintf("remote account %s", runtimeAuth.SourceAlias)
+			}
+			return fmt.Errorf("seed runtime config.toml from %s: %w", sourceDesc, err)
+		}
 		return nil
 	}
+	return syncDefaultRuntimeConfig(codexHome)
+}
+
+func syncDefaultRuntimeConfig(codexHome string) error {
+	if sourceConfig := defaultCodexConfigPath(codexHome); sourceConfig != "" {
+		return copyRuntimeConfigFile(sourceConfig, codexHome, "default Codex home")
+	}
+	return nil
+}
+
+func copyRuntimeConfigFile(sourceConfig, codexHome, sourceDesc string) error {
 	targetConfig := filepath.Join(codexHome, "config.toml")
 	if sameCleanPath(sourceConfig, targetConfig) {
 		return nil
@@ -286,23 +320,6 @@ func syncRuntimeConfig(snapshot StoreFile, codexHome string) error {
 		return fmt.Errorf("seed runtime config.toml from %s: %w", sourceDesc, err)
 	}
 	return nil
-}
-
-func runtimeConfigSource(snapshot StoreFile, codexHome string) (string, string) {
-	for _, idx := range runtimeAuthCandidateIndexes(snapshot, time.Now().UnixMilli()) {
-		if idx < 0 || idx >= len(snapshot.Accounts) {
-			continue
-		}
-		sourceConfig := filepath.Join(snapshot.Accounts[idx].HomeDir, "config.toml")
-		if isRegularFile(sourceConfig) {
-			return sourceConfig, fmt.Sprintf("account %s", snapshot.Accounts[idx].Alias)
-		}
-	}
-
-	if sourceConfig := defaultCodexConfigPath(codexHome); sourceConfig != "" {
-		return sourceConfig, "default Codex home"
-	}
-	return "", ""
 }
 
 func defaultCodexConfigPath(codexHome string) string {
@@ -339,35 +356,35 @@ func sameCleanPath(a, b string) bool {
 	return filepath.Clean(a) == filepath.Clean(b)
 }
 
-func fetchRemoteRuntimeAuth(proxyURL string) ([]byte, error) {
+func fetchRemoteRuntimeAuth(proxyURL string) (AdminRuntimeAuthResponse, error) {
 	url := strings.TrimSpace(proxyURL)
 	if url == "" {
-		return nil, fmt.Errorf("empty proxy URL")
+		return AdminRuntimeAuthResponse{}, fmt.Errorf("empty proxy URL")
 	}
 	url = strings.TrimRight(url, "/") + "/admin/runtime-auth"
 
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return nil, err
+		return AdminRuntimeAuthResponse{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("runtime auth request failed with status=%d", resp.StatusCode)
+		return AdminRuntimeAuthResponse{}, fmt.Errorf("runtime auth request failed with status=%d", resp.StatusCode)
 	}
 
 	var payload AdminRuntimeAuthResponse
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode runtime auth response: %w", err)
+		return AdminRuntimeAuthResponse{}, fmt.Errorf("decode runtime auth response: %w", err)
 	}
 	if len(payload.Auth) == 0 {
-		return nil, fmt.Errorf("missing auth payload")
+		return AdminRuntimeAuthResponse{}, fmt.Errorf("missing auth payload")
 	}
 	if !json.Valid(payload.Auth) {
-		return nil, fmt.Errorf("runtime auth payload is not valid JSON")
+		return AdminRuntimeAuthResponse{}, fmt.Errorf("runtime auth payload is not valid JSON")
 	}
-	return payload.Auth, nil
+	return payload, nil
 }
 
 func runtimeAuthCandidateIndexes(snapshot StoreFile, nowMS int64) []int {

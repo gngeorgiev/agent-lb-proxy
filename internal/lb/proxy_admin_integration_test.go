@@ -30,6 +30,9 @@ func TestProxyAdminImportListPinUnpinRemove(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(source, "auth.json"), b, 0o600); err != nil {
 		t.Fatalf("write source auth: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(source, "config.toml"), []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write source config: %v", err)
+	}
 
 	callAdminJSON(t, http.MethodPost, srv.URL+"/admin/account/import", AdminImportRequest{
 		Alias:    "alice",
@@ -49,6 +52,9 @@ func TestProxyAdminImportListPinUnpinRemove(t *testing.T) {
 	}
 	if runtimeAuthResp.SourceAlias != "alice" {
 		t.Fatalf("expected source alias alice, got %q", runtimeAuthResp.SourceAlias)
+	}
+	if runtimeAuthResp.Config != "model = \"gpt-5\"\n" {
+		t.Fatalf("expected runtime config payload, got %q", runtimeAuthResp.Config)
 	}
 
 	callAdminJSON(t, http.MethodPost, srv.URL+"/admin/account/pin", AdminAliasRequest{Alias: "alice"}, nil)

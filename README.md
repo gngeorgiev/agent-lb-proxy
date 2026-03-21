@@ -94,6 +94,7 @@ Defaults:
 - Proxy listens on `0.0.0.0:8765` in container and is published as `127.0.0.1:8765` on host.
 - Host `~/.codex-lb` is bind-mounted to `/data` in container.
 - Container runs `codexlb proxy --root /data`.
+- Image includes both `codexlb` and the `codex` CLI.
 
 Mounted data under `/data` includes:
 
@@ -110,6 +111,10 @@ Optional environment overrides:
 - `CODEXLB_BIND_HOST`
 - `CODEXLB_PORT`
 - `UID` / `GID` (container runtime user)
+
+Optional build args:
+
+- `CODEX_NPM_VERSION` (defaults to `latest`)
 
 CLI environment overrides:
 

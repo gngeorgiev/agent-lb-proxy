@@ -31,5 +31,6 @@ type AdminMutationResponse struct {
 
 type AdminRuntimeAuthResponse struct {
 	Auth        json.RawMessage `json:"auth"`
+	Config      string          `json:"config,omitempty"`
 	SourceAlias string          `json:"source_alias,omitempty"`
 }

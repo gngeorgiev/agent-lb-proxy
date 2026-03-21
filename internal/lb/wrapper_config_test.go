@@ -221,6 +221,46 @@ func TestSeedRuntimeAuthIfMissingFetchesFromRemoteProxy(t *testing.T) {
 	}
 }
 
+func TestSeedRuntimeAuthIfMissingCopiesRemoteRuntimeConfig(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	wantConfig := "model = \"gpt-5.2-codex\"\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/admin/runtime-auth" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(AdminRuntimeAuthResponse{
+			Auth:        json.RawMessage(`{"tokens":{"access_token":"remote-access","id_token":"remote-id","account_id":"acct-remote"}}`),
+			Config:      wantConfig,
+			SourceAlias: "remote-a",
+		})
+	}))
+	defer server.Close()
+
+	runtimeHome := filepath.Join(root, "runtime-remote-config")
+	if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
+		t.Fatalf("mkdir runtime home: %v", err)
+	}
+	if err := seedRuntimeAuthIfMissing(store, runtimeHome, server.URL); err != nil {
+		t.Fatalf("seedRuntimeAuthIfMissing: %v", err)
+	}
+
+	gotConfig, err := os.ReadFile(filepath.Join(runtimeHome, "config.toml"))
+	if err != nil {
+		t.Fatalf("read runtime config.toml: %v", err)
+	}
+	if string(gotConfig) != wantConfig {
+		t.Fatalf("runtime config.toml = %q, want %q", string(gotConfig), wantConfig)
+	}
+}
+
 func TestSeedRuntimeAuthIfMissingCopiesUserConfigWhenAccountConfigMissing(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
@@ -325,6 +365,76 @@ func TestSeedRuntimeAuthIfMissingPrefersAccountConfigOverUserConfig(t *testing.T
 	}
 	if string(gotConfig) != string(wantConfig) {
 		t.Fatalf("runtime config.toml = %q, want %q", string(gotConfig), string(wantConfig))
+	}
+}
+
+func TestSeedRuntimeAuthIfMissingDoesNotBorrowDifferentAccountConfig(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("CODEX_HOME", "")
+
+	userCodexHome := filepath.Join(root, ".codex")
+	if err := os.MkdirAll(userCodexHome, 0o700); err != nil {
+		t.Fatalf("mkdir user codex home: %v", err)
+	}
+	fallbackConfig := []byte("model = \"gpt-5.4\"\n")
+	if err := os.WriteFile(filepath.Join(userCodexHome, "config.toml"), fallbackConfig, 0o600); err != nil {
+		t.Fatalf("write user config.toml: %v", err)
+	}
+
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	homeA := filepath.Join(root, "acc-a")
+	homeB := filepath.Join(root, "acc-b")
+	if err := os.MkdirAll(homeA, 0o700); err != nil {
+		t.Fatalf("mkdir homeA: %v", err)
+	}
+	if err := os.MkdirAll(homeB, 0o700); err != nil {
+		t.Fatalf("mkdir homeB: %v", err)
+	}
+	writeAuthForTest(t, homeA, "acct-a", "a@example.com")
+	writeAuthForTest(t, homeB, "acct-b", "b@example.com")
+	if err := os.WriteFile(filepath.Join(homeA, "config.toml"), []byte("model = \"wrong-account\"\n"), 0o600); err != nil {
+		t.Fatalf("write account A config.toml: %v", err)
+	}
+
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Accounts = []Account{
+			{Alias: "a", ID: "openai:a", HomeDir: homeA, Enabled: true},
+			{Alias: "b", ID: "openai:b", HomeDir: homeB, Enabled: true},
+		}
+		sf.State.ActiveIndex = 0
+		sf.State.PinnedAccountID = "openai:b"
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	runtimeHome := filepath.Join(root, "runtime-no-borrow")
+	if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
+		t.Fatalf("mkdir runtime home: %v", err)
+	}
+	if err := seedRuntimeAuthIfMissing(store, runtimeHome, ""); err != nil {
+		t.Fatalf("seedRuntimeAuthIfMissing: %v", err)
+	}
+
+	auth, err := LoadAuth(runtimeHome)
+	if err != nil {
+		t.Fatalf("LoadAuth(runtime): %v", err)
+	}
+	if auth.ChatGPTAccountID != "acct-b" {
+		t.Fatalf("expected runtime account acct-b, got %q", auth.ChatGPTAccountID)
+	}
+
+	gotConfig, err := os.ReadFile(filepath.Join(runtimeHome, "config.toml"))
+	if err != nil {
+		t.Fatalf("read runtime config.toml: %v", err)
+	}
+	if string(gotConfig) != string(fallbackConfig) {
+		t.Fatalf("runtime config.toml = %q, want fallback %q", string(gotConfig), string(fallbackConfig))
 	}
 }
 

@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        CODEX_NPM_VERSION: ${CODEX_NPM_VERSION:-latest}
     container_name: codexlb-proxy
     restart: unless-stopped
     user: "${UID:-1000}:${GID:-1000}"

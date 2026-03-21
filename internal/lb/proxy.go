@@ -171,8 +171,14 @@ func (p *ProxyServer) handleAdmin(w http.ResponseWriter, r *http.Request) int {
 			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid auth.json for %s", account.Alias))
 			return http.StatusBadRequest
 		}
+		var rawConfig []byte
+		configPath := filepath.Join(account.HomeDir, "config.toml")
+		if data, err := os.ReadFile(configPath); err == nil {
+			rawConfig = data
+		}
 		writeJSON(w, http.StatusOK, AdminRuntimeAuthResponse{
 			Auth:        json.RawMessage(rawAuth),
+			Config:      string(rawConfig),
 			SourceAlias: account.Alias,
 		})
 		return http.StatusOK
