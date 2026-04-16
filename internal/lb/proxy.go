@@ -86,6 +86,27 @@ func NewProxyServer(store *Store, logger *log.Logger, events *EventLogger) *Prox
 	}
 }
 
+func (p *ProxyServer) StartMaintenanceLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	go func() {
+		p.maybeRefreshQuota(ctx, time.Now(), false)
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				p.maybeRefreshQuota(ctx, now, false)
+			}
+		}
+	}()
+}
+
 func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqID := p.requestSeq.Add(1)
 	p.logEvent("request.received", map[string]any{

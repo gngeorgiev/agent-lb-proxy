@@ -743,6 +743,57 @@ func TestAccountRemoveProxyNameTargetsGrandchildProxy(t *testing.T) {
 	}
 }
 
+func TestAccountRemoveInfersProxyNameFromStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/status":
+			_ = json.NewEncoder(w).Encode(lb.ProxyStatus{
+				ProxyName: "edge-main",
+				Accounts: []lb.AccountStatus{
+					{ProxyName: "edge-main", Alias: "f", ID: "openai:f"},
+					{ProxyName: "edge-vpn", Alias: "t", ID: "openai:t"},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/admin/account/rm":
+			if got := r.Header.Get(adminTargetProxyNameHeader); got != "edge-vpn" {
+				t.Fatalf("expected %s=edge-vpn, got %q", adminTargetProxyNameHeader, got)
+			}
+			var req lb.AdminAliasRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if req.Alias != "t" {
+				t.Fatalf("unexpected alias: %q", req.Alias)
+			}
+			_ = json.NewEncoder(w).Encode(lb.AdminMutationResponse{OK: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	store, err := lb.OpenStore(root)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	cfg := store.Snapshot().Settings
+	cfg.ProxyURL = server.URL
+	if err := lb.WriteSettingsConfig(root, cfg); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	out, code := captureStdout(func() int {
+		return run([]string{"account", "rm", "--root", root, "t"})
+	})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d out=%s", code, out)
+	}
+	if !strings.Contains(out, "removed account t") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
 func TestAccountPinDefaultsToConfiguredProxyURL(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -783,6 +834,57 @@ func TestAccountPinDefaultsToConfiguredProxyURL(t *testing.T) {
 		t.Fatalf("expected one remote pin call, got %d", calls)
 	}
 	if !strings.Contains(out, "pinned account g") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+func TestAccountPinInfersProxyNameFromStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/status":
+			_ = json.NewEncoder(w).Encode(lb.ProxyStatus{
+				ProxyName: "edge-main",
+				Accounts: []lb.AccountStatus{
+					{ProxyName: "edge-main", Alias: "g", ID: "openai:g"},
+					{ProxyName: "edge-vpn", Alias: "usa1", ID: "openai:usa1"},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/admin/account/pin":
+			if got := r.Header.Get(adminTargetProxyNameHeader); got != "edge-vpn" {
+				t.Fatalf("expected %s=edge-vpn, got %q", adminTargetProxyNameHeader, got)
+			}
+			var req lb.AdminAliasRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if req.Alias != "usa1" {
+				t.Fatalf("unexpected alias: %q", req.Alias)
+			}
+			_ = json.NewEncoder(w).Encode(lb.AdminMutationResponse{OK: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	store, err := lb.OpenStore(root)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	cfg := store.Snapshot().Settings
+	cfg.ProxyURL = server.URL
+	if err := lb.WriteSettingsConfig(root, cfg); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	out, code := captureStdout(func() int {
+		return run([]string{"account", "pin", "--root", root, "usa1"})
+	})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d out=%s", code, out)
+	}
+	if !strings.Contains(out, "pinned account usa1") {
 		t.Fatalf("unexpected output: %q", out)
 	}
 }

@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestLoadAuthExtractsClaims(t *testing.T) {
@@ -161,6 +165,93 @@ func TestRefreshAuthPersistsRotatedTokens(t *testing.T) {
 	tokens, _ := persisted["tokens"].(map[string]any)
 	if got := stringField(tokens["refresh_token"]); got != "refresh-new" {
 		t.Fatalf("persisted refresh token = %q", got)
+	}
+}
+
+func TestRefreshAuthSerializesConcurrentRefreshesPerAccount(t *testing.T) {
+	home := t.TempDir()
+	oldAccess := testJWT(map[string]any{
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-old"},
+	})
+	newAccess := testJWT(map[string]any{
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-new"},
+	})
+
+	auth := map[string]any{
+		"auth_mode": "chatgpt",
+		"tokens": map[string]any{
+			"access_token":  oldAccess,
+			"refresh_token": "refresh-old",
+			"id_token":      "id-old",
+			"account_id":    "acct-old",
+		},
+	}
+	b, _ := json.Marshal(auth)
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), b, 0o600); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+
+	var calls atomic.Int32
+	var seenRefresh sync.Map
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		refreshToken := r.Form.Get("refresh_token")
+		if refreshToken != "refresh-old" {
+			t.Fatalf("unexpected refresh token: %q", refreshToken)
+		}
+		if _, loaded := seenRefresh.LoadOrStore(refreshToken, true); loaded {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"message":"refresh token already used","code":"refresh_token_reused"}}`)
+			return
+		}
+		if call == 1 {
+			time.Sleep(150 * time.Millisecond)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  newAccess,
+			"refresh_token": "refresh-new",
+			"id_token":      "id-new",
+		})
+	}))
+	defer tokenSrv.Close()
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	results := make(chan AuthInfo, 2)
+	for range 2 {
+		go func() {
+			<-start
+			info, err := RefreshAuth(context.Background(), tokenSrv.Client(), home, tokenSrv.URL, "client-123", oldAccess)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- info
+		}()
+	}
+	close(start)
+
+	for range 2 {
+		select {
+		case err := <-errs:
+			t.Fatalf("RefreshAuth: %v", err)
+		case info := <-results:
+			if info.AccessToken != newAccess {
+				t.Fatalf("unexpected access token after concurrent refresh: %q", info.AccessToken)
+			}
+			if info.RefreshToken != "refresh-new" {
+				t.Fatalf("unexpected refresh token after concurrent refresh: %q", info.RefreshToken)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for concurrent refresh")
+		}
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected one token refresh request, got %d", got)
 	}
 }
 

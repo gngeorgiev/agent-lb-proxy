@@ -182,6 +182,7 @@ Environment:
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	proxy.StartMaintenanceLoop(sigCtx, time.Minute)
 	lb.StartConfigReloader(sigCtx, store, proxyLogger, events, time.Second)
 
 	select {
@@ -582,7 +583,8 @@ Flags:
 		targetProxyURL = resolveAccountAdminTargetURL(store, "", strings.TrimSpace(*proxyName))
 	}
 	if targetProxyURL != "" {
-		if _, err := remoteAdminRemoveWithClient(http.DefaultClient, targetProxyURL, strings.TrimSpace(*proxyName), args[0]); err != nil {
+		targetProxyURL, targetProxyName := resolveAccountAdminMutationTargetWithClient(http.DefaultClient, store, targetProxyURL, strings.TrimSpace(*proxyName), args[0])
+		if _, err := remoteAdminRemoveWithClient(http.DefaultClient, targetProxyURL, targetProxyName, args[0]); err != nil {
 			fmt.Fprintf(os.Stderr, "remove account (remote): %v\n", err)
 			return 1
 		}
@@ -659,7 +661,8 @@ func runPinCommand(argv []string, flagSetName, usage, errPrefix, successFormat s
 		targetProxyURL = resolveAccountAdminTargetURL(store, "", strings.TrimSpace(*proxyName))
 	}
 	if targetProxyURL != "" {
-		if _, err := remoteAdminPinWithClient(http.DefaultClient, targetProxyURL, strings.TrimSpace(*proxyName), alias); err != nil {
+		targetProxyURL, targetProxyName := resolveAccountAdminMutationTargetWithClient(http.DefaultClient, store, targetProxyURL, strings.TrimSpace(*proxyName), alias)
+		if _, err := remoteAdminPinWithClient(http.DefaultClient, targetProxyURL, targetProxyName, alias); err != nil {
 			fmt.Fprintf(os.Stderr, "%s (remote): %v\n", errPrefix, err)
 			return 1
 		}
@@ -886,7 +889,8 @@ Examples:
 
 func tryRemotePinWithFallback(store *lb.Store, alias string) error {
 	client := remoteAdminFallbackClient()
-	_, err := remoteAdminPinWithClient(client, resolveProxyURL(store, ""), "", alias)
+	targetURL, targetProxyName := resolveAccountAdminMutationTargetWithClient(client, store, "", "", alias)
+	_, err := remoteAdminPinWithClient(client, targetURL, targetProxyName, alias)
 	return err
 }
 
@@ -909,7 +913,9 @@ func tryRemoteListWithFallback(store *lb.Store) ([]lb.Account, error) {
 }
 
 func tryRemoteRemoveWithFallback(store *lb.Store, alias string) (lb.AdminMutationResponse, error) {
-	return remoteAdminRemoveWithClient(remoteAdminFallbackClient(), resolveProxyURL(store, ""), "", alias)
+	client := remoteAdminFallbackClient()
+	targetURL, targetProxyName := resolveAccountAdminMutationTargetWithClient(client, store, "", "", alias)
+	return remoteAdminRemoveWithClient(client, targetURL, targetProxyName, alias)
 }
 
 func remoteAdminFallbackClient() *http.Client {
@@ -1104,6 +1110,86 @@ func resolveAccountAdminTargetURL(store *lb.Store, proxyURL, proxyName string) s
 		return "http://" + snapshot.Settings.Proxy.Listen
 	}
 	return ""
+}
+
+func resolveAccountAdminMutationTargetWithClient(client *http.Client, store *lb.Store, proxyURL, proxyName, alias string) (string, string) {
+	explicitProxyName := strings.TrimSpace(proxyName)
+	targetURL := strings.TrimSpace(proxyURL)
+	if targetURL == "" {
+		if store == nil {
+			return "", explicitProxyName
+		}
+		targetURL = resolveAccountAdminTargetURL(store, "", proxyName)
+	}
+	if targetURL == "" {
+		return "", explicitProxyName
+	}
+	if explicitProxyName != "" {
+		return targetURL, explicitProxyName
+	}
+	resolvedProxyName, err := resolveProxyNameForAccountAliasWithClient(client, targetURL, alias)
+	if err != nil {
+		return targetURL, ""
+	}
+	return targetURL, resolvedProxyName
+}
+
+func resolveProxyNameForAccountAliasWithClient(client *http.Client, proxyURL, alias string) (string, error) {
+	status, err := fetchProxyStatusWithClient(client, proxyURL)
+	if err != nil {
+		return "", err
+	}
+
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return "", nil
+	}
+
+	matches := map[string]struct{}{}
+	for _, account := range status.Accounts {
+		if account.Alias != alias && account.ID != alias {
+			continue
+		}
+		name := strings.TrimSpace(account.ProxyName)
+		if name == "" {
+			name = strings.TrimSpace(status.ProxyName)
+		}
+		if name == "" {
+			return "", nil
+		}
+		matches[name] = struct{}{}
+	}
+
+	if len(matches) != 1 {
+		return "", nil
+	}
+	for name := range matches {
+		return name, nil
+	}
+	return "", nil
+}
+
+func fetchProxyStatusWithClient(client *http.Client, proxyURL string) (lb.ProxyStatus, error) {
+	statusURL := strings.TrimRight(strings.TrimSpace(proxyURL), "/") + "/status"
+	resp, err := client.Get(statusURL)
+	if err != nil {
+		return lb.ProxyStatus{}, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return lb.ProxyStatus{}, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return lb.ProxyStatus{}, fmt.Errorf("proxy status error: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var status lb.ProxyStatus
+	if err := json.Unmarshal(body, &status); err != nil {
+		return lb.ProxyStatus{}, fmt.Errorf("decode status JSON: %w", err)
+	}
+	return status, nil
 }
 
 func printStatusShort(status lb.ProxyStatus) {

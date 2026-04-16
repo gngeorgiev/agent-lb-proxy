@@ -12,6 +12,7 @@ It lets you run Codex through a local proxy that can switch between multiple aut
 - Recursive proxy chaining across child `codexlb` instances
 - Automatic failover/cooldown on `429` and `5xx`
 - Automatic disable on auth errors (`401`, `403`)
+- Periodic background quota/auth refresh for idle accounts
 - Wrapper execution via local proxy (`OPENAI_BASE_URL`)
 - Structured logs under `~/.codex-lb/logs`
 - Tunable runtime config in `~/.codex-lb/config.toml`
@@ -468,6 +469,7 @@ Query `GET /status` from proxy.
 
 Default output renders a table with active/pin markers, account identity, health/cooldown state, quota percentages, score, and last-switch metadata.
 The proxy serves cached status immediately and refreshes quota and child-proxy data in the background, so `codexlb status` does not block on slow upstream health checks.
+The proxy process also runs the same quota/auth refresh path periodically while idle, using `quota.refresh_interval_minutes` as the freshness target, so long-unused accounts can rotate expired auth before they are selected for live traffic.
 
 Usage:
 

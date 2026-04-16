@@ -797,6 +797,112 @@ func TestProxyStatusRefreshesDisabled401Account(t *testing.T) {
 	}
 }
 
+func TestProxyMaintenanceLoopRefreshesIdleAccountAuth(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	store, err := OpenStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	oldToken := testJWT(map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-a"}})
+	newToken := testJWT(map[string]any{
+		"https://api.openai.com/auth":    map[string]any{"chatgpt_account_id": "acct-a"},
+		"https://api.openai.com/profile": map[string]any{"email": "a@example.com"},
+	})
+	home := filepath.Join(tmp, "acc-a")
+	writeAuthTokensFile(t, home, oldToken, "refresh-a-1", "acct-a")
+
+	authCalls := 0
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authCalls++
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		if got := r.Form.Get("refresh_token"); got != "refresh-a-1" {
+			t.Fatalf("unexpected refresh token: %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  newToken,
+			"refresh_token": "refresh-a-2",
+			"id_token":      testJWT(map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-a"}}),
+		})
+	}))
+	defer authSrv.Close()
+
+	usageCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/wham/usage" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		usageCalls++
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token != newToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"unauthorized"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"rate_limit":{"primary_window":{"used_percent":25},"secondary_window":{"used_percent":30}}}`)
+	}))
+	defer upstream.Close()
+
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Settings.Proxy.UpstreamBaseURL = upstream.URL + "/backend-api"
+		sf.Settings.Quota.RefreshIntervalMinutes = 1
+		sf.Settings.Quota.RefreshIntervalMessages = 1
+		sf.Accounts = []Account{
+			{
+				ID:      "a",
+				Alias:   "a",
+				HomeDir: home,
+				BaseURL: sf.Settings.Proxy.UpstreamBaseURL,
+				Enabled: true,
+			},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	proxy := NewProxyServer(store, nil, nil)
+	proxy.authTokenURL = authSrv.URL
+	proxy.authClientID = "client-123"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proxy.StartMaintenanceLoop(ctx, 10*time.Millisecond)
+
+	if !waitFor(t, 2*time.Second, 20*time.Millisecond, func() bool {
+		snap := store.Snapshot()
+		return snap.Accounts[0].Quota.Source == "openai_usage_api"
+	}) {
+		t.Fatalf("expected maintenance loop to refresh quota for idle account")
+	}
+
+	snap := store.Snapshot()
+	if !snap.Accounts[0].Enabled {
+		t.Fatalf("expected idle account to remain enabled")
+	}
+	if snap.Accounts[0].DisabledReason != "" {
+		t.Fatalf("expected no disabled reason, got %q", snap.Accounts[0].DisabledReason)
+	}
+	if authCalls != 1 {
+		t.Fatalf("expected one auth refresh call, got %d", authCalls)
+	}
+	if usageCalls < 2 {
+		t.Fatalf("expected usage call to retry after auth refresh, got %d calls", usageCalls)
+	}
+
+	authInfo, err := LoadAuth(home)
+	if err != nil {
+		t.Fatalf("LoadAuth after maintenance refresh: %v", err)
+	}
+	if authInfo.RefreshToken != "refresh-a-2" {
+		t.Fatalf("expected rotated refresh token after maintenance refresh, got %q", authInfo.RefreshToken)
+	}
+}
+
 func TestProxyDoesNotDisableAccountOn403ForNonAccountPath(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
