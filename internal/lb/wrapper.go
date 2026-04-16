@@ -34,7 +34,7 @@ func LoginAccount(store *Store, alias, codexBin string, loginArgs []string) erro
 		return err
 	}
 	home := AccountHomeDir(store, alias)
-	if err := loginAccountHome(store, home, codexBin, loginArgs); err != nil {
+	if err := loginAccountHomeWithIO(store, home, codexBin, loginArgs, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		return err
 	}
 	return RegisterAccount(store, alias, home)
@@ -44,10 +44,21 @@ func LoginAccountToHome(store *Store, alias, home, codexBin string, loginArgs []
 	if err := ValidateAlias(alias); err != nil {
 		return err
 	}
-	return loginAccountHome(store, home, codexBin, loginArgs)
+	return loginAccountHomeWithIO(store, home, codexBin, loginArgs, os.Stdin, os.Stdout, os.Stderr)
 }
 
-func loginAccountHome(store *Store, home, codexBin string, loginArgs []string) error {
+func LoginAccountWithIO(store *Store, alias, codexBin string, loginArgs []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if err := ValidateAlias(alias); err != nil {
+		return err
+	}
+	home := AccountHomeDir(store, alias)
+	if err := loginAccountHomeWithIO(store, home, codexBin, loginArgs, stdin, stdout, stderr); err != nil {
+		return err
+	}
+	return RegisterAccount(store, alias, home)
+}
+
+func loginAccountHomeWithIO(store *Store, home, codexBin string, loginArgs []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return fmt.Errorf("create account home: %w", err)
 	}
@@ -62,9 +73,15 @@ func loginAccountHome(store *Store, home, codexBin string, loginArgs []string) e
 	args := append(append([]string(nil), baseLogin...), loginArgs...)
 	cmd := exec.Command(codexBin, args...)
 	cmd.Env = withEnv(os.Environ(), map[string]string{"CODEX_HOME": home})
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdin = stdin
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("run %s %s: %w", codexBin, strings.Join(args, " "), err)
 	}

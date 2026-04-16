@@ -14,6 +14,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -21,6 +22,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+)
+
+const (
+	adminTargetProxyNameHeader      = "X-CodexLB-Target-Proxy-Name"
+	adminErrorCodeTargetNotFound    = "target_proxy_not_found"
+	adminErrorCodeTargetAmbiguous   = "target_proxy_ambiguous"
+	adminErrorCodeTargetUnavailable = "target_proxy_unavailable"
+	adminLoginStreamExitCodeTrailer = "X-CodexLB-Login-Exit-Code"
+	adminLoginStreamErrorTrailer    = "X-CodexLB-Login-Error"
 )
 
 type ProxyServer struct {
@@ -42,6 +52,7 @@ type ProxyServer struct {
 	childProxyMu        sync.Mutex
 	childProxyStates    map[string]childProxyRuntime
 	childProxyActiveURL string
+	activeRouteID       string
 }
 
 const maxDisableBodyLogBytes = 2048
@@ -159,6 +170,15 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *ProxyServer) handleAdmin(w http.ResponseWriter, r *http.Request) int {
+	targetProxyName := strings.TrimSpace(r.Header.Get(adminTargetProxyNameHeader))
+	if targetProxyName != "" {
+		snapshot := p.store.Snapshot()
+		if !strings.EqualFold(targetProxyName, snapshot.Settings.Proxy.Name) {
+			return p.forwardAdminToNamedProxy(w, r, snapshot, targetProxyName)
+		}
+		r.Header.Del(adminTargetProxyNameHeader)
+	}
+
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/admin/accounts":
 		snapshot := p.store.Snapshot()
@@ -205,6 +225,10 @@ func (p *ProxyServer) handleAdmin(w http.ResponseWriter, r *http.Request) int {
 		if strings.TrimSpace(req.Alias) == "" {
 			writeJSONError(w, http.StatusBadRequest, "alias is required")
 			return http.StatusBadRequest
+		}
+		req.LoginArgs = effectiveAdminLoginArgs(p.store.Snapshot(), req.LoginArgs)
+		if isStreamingAdminLoginRequest(r) {
+			return p.handleStreamingAdminLogin(w, req)
 		}
 		if err := LoginAccount(p.store, req.Alias, req.CodexBin, req.LoginArgs); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -348,7 +372,335 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]any{"error": message})
+	writeJSONErrorCode(w, status, "", message)
+}
+
+func writeJSONErrorCode(w http.ResponseWriter, status int, code, message string) {
+	payload := map[string]any{"error": message}
+	if strings.TrimSpace(code) != "" {
+		payload["code"] = code
+	}
+	writeJSON(w, status, payload)
+}
+
+type adminForwardResponse struct {
+	StatusCode int
+	Body       []byte
+	Header     http.Header
+	ErrorCode  string
+}
+
+type adminErrorPayload struct {
+	Error string `json:"error"`
+	Code  string `json:"code,omitempty"`
+}
+
+func (p *ProxyServer) forwardAdminToNamedProxy(w http.ResponseWriter, r *http.Request, snapshot StoreFile, targetProxyName string) int {
+	if !hasChildProxyRouting(snapshot) {
+		writeJSONErrorCode(w, http.StatusNotFound, adminErrorCodeTargetNotFound, fmt.Sprintf("target proxy not found: %s", targetProxyName))
+		return http.StatusNotFound
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("read admin request body: %v", err))
+		return http.StatusBadRequest
+	}
+	_ = r.Body.Close()
+	if isStreamingAdminLoginRequest(r) {
+		return p.forwardStreamingAdminToNamedProxy(w, r, snapshot, targetProxyName, body)
+	}
+
+	matchURLs, searchErr := p.findDirectChildProxyMatches(r.Context(), snapshot, targetProxyName)
+	if searchErr != nil {
+		writeJSONErrorCode(w, http.StatusBadGateway, adminErrorCodeTargetUnavailable, searchErr.Error())
+		return http.StatusBadGateway
+	}
+	switch len(matchURLs) {
+	case 0:
+	case 1:
+		resp, err := p.forwardAdminRequest(r.Context(), matchURLs[0], r, body, targetProxyName)
+		if err != nil {
+			writeJSONErrorCode(w, http.StatusBadGateway, adminErrorCodeTargetUnavailable, err.Error())
+			return http.StatusBadGateway
+		}
+		return writeForwardedAdminResponse(w, resp)
+	default:
+		writeJSONErrorCode(w, http.StatusConflict, adminErrorCodeTargetAmbiguous, fmt.Sprintf("target proxy name %q matched multiple direct child proxies", targetProxyName))
+		return http.StatusConflict
+	}
+
+	var matched *adminForwardResponse
+	searchErrors := []string{}
+	for _, childURL := range snapshot.Settings.Proxy.ChildProxyURLs {
+		resp, err := p.forwardAdminRequest(r.Context(), childURL, r, body, targetProxyName)
+		if err != nil {
+			searchErrors = append(searchErrors, err.Error())
+			continue
+		}
+		if resp.StatusCode == http.StatusNotFound && resp.ErrorCode == adminErrorCodeTargetNotFound {
+			continue
+		}
+		if matched != nil {
+			writeJSONErrorCode(w, http.StatusConflict, adminErrorCodeTargetAmbiguous, fmt.Sprintf("target proxy name %q matched multiple proxies", targetProxyName))
+			return http.StatusConflict
+		}
+		copyResp := *resp
+		copyResp.Header = resp.Header.Clone()
+		copyResp.Body = append([]byte(nil), resp.Body...)
+		matched = &copyResp
+	}
+	if matched != nil {
+		return writeForwardedAdminResponse(w, matched)
+	}
+	if len(searchErrors) > 0 {
+		writeJSONErrorCode(w, http.StatusBadGateway, adminErrorCodeTargetUnavailable, fmt.Sprintf("search target proxy %q: %s", targetProxyName, searchErrors[0]))
+		return http.StatusBadGateway
+	}
+	writeJSONErrorCode(w, http.StatusNotFound, adminErrorCodeTargetNotFound, fmt.Sprintf("target proxy not found: %s", targetProxyName))
+	return http.StatusNotFound
+}
+
+func isStreamingAdminLoginRequest(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Path == "/admin/account/login" && r.URL.Query().Get("stream") == "1"
+}
+
+func effectiveAdminLoginArgs(snapshot StoreFile, args []string) []string {
+	args = append([]string(nil), args...)
+	if len(args) > 0 {
+		return args
+	}
+	baseLogin := sanitizeCommand(snapshot.Settings.Commands.Login)
+	for _, part := range baseLogin {
+		if strings.TrimSpace(part) == "--device-auth" {
+			return args
+		}
+	}
+	return []string{"--device-auth"}
+}
+
+func (p *ProxyServer) handleStreamingAdminLogin(w http.ResponseWriter, req AdminLoginRequest) int {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Add("Trailer", adminLoginStreamExitCodeTrailer)
+	w.Header().Add("Trailer", adminLoginStreamErrorTrailer)
+	w.WriteHeader(http.StatusOK)
+
+	fw := newFlushWriter(w)
+	if err := LoginAccountWithIO(p.store, req.Alias, req.CodexBin, req.LoginArgs, nil, fw, fw); err != nil {
+		w.Header().Set(adminLoginStreamExitCodeTrailer, strconv.Itoa(exitCodeFromError(err)))
+		w.Header().Set(adminLoginStreamErrorTrailer, err.Error())
+		return http.StatusOK
+	}
+	total := len(p.store.Snapshot().Accounts)
+	_, _ = fmt.Fprintf(fw, "registered account %s (total=%d)\n", req.Alias, total)
+	w.Header().Set(adminLoginStreamExitCodeTrailer, "0")
+	return http.StatusOK
+}
+
+func (p *ProxyServer) findDirectChildProxyMatches(ctx context.Context, snapshot StoreFile, targetProxyName string) ([]string, error) {
+	targetProxyName = strings.TrimSpace(targetProxyName)
+	if targetProxyName == "" {
+		return nil, nil
+	}
+	matches := []string{}
+	errorsSeen := []string{}
+	for _, childURL := range snapshot.Settings.Proxy.ChildProxyURLs {
+		status, err := p.fetchChildProxyStatus(ctx, childURL, true)
+		if err != nil {
+			errorsSeen = append(errorsSeen, fmt.Sprintf("query child proxy %s: %v", childURL, err))
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(status.ProxyName), targetProxyName) {
+			matches = append(matches, childURL)
+		}
+	}
+	if len(matches) == 0 && len(errorsSeen) > 0 {
+		return nil, errors.New(errorsSeen[0])
+	}
+	return matches, nil
+}
+
+func (p *ProxyServer) forwardStreamingAdminToNamedProxy(w http.ResponseWriter, r *http.Request, snapshot StoreFile, targetProxyName string, body []byte) int {
+	matchURLs, searchErr := p.findDirectChildProxyMatches(r.Context(), snapshot, targetProxyName)
+	if searchErr != nil {
+		writeJSONErrorCode(w, http.StatusBadGateway, adminErrorCodeTargetUnavailable, searchErr.Error())
+		return http.StatusBadGateway
+	}
+	switch len(matchURLs) {
+	case 0:
+	case 1:
+		return p.streamForwardAdminRequest(w, r, matchURLs[0], body, targetProxyName)
+	default:
+		writeJSONErrorCode(w, http.StatusConflict, adminErrorCodeTargetAmbiguous, fmt.Sprintf("target proxy name %q matched multiple direct child proxies", targetProxyName))
+		return http.StatusConflict
+	}
+
+	searchErrors := []string{}
+	for _, childURL := range snapshot.Settings.Proxy.ChildProxyURLs {
+		resp, err := p.openForwardAdminRequest(r.Context(), childURL, r, body, targetProxyName)
+		if err != nil {
+			searchErrors = append(searchErrors, err.Error())
+			continue
+		}
+		targetNotFound, checkErr := isTargetNotFoundAdminResponse(resp)
+		if checkErr != nil {
+			searchErrors = append(searchErrors, checkErr.Error())
+			continue
+		}
+		if targetNotFound {
+			continue
+		}
+		return writeStreamingForwardedAdminResponse(w, resp)
+	}
+	if len(searchErrors) > 0 {
+		writeJSONErrorCode(w, http.StatusBadGateway, adminErrorCodeTargetUnavailable, fmt.Sprintf("search target proxy %q: %s", targetProxyName, searchErrors[0]))
+		return http.StatusBadGateway
+	}
+	writeJSONErrorCode(w, http.StatusNotFound, adminErrorCodeTargetNotFound, fmt.Sprintf("target proxy not found: %s", targetProxyName))
+	return http.StatusNotFound
+}
+
+func (p *ProxyServer) forwardAdminRequest(ctx context.Context, proxyURL string, original *http.Request, body []byte, targetProxyName string) (*adminForwardResponse, error) {
+	resp, err := p.openForwardAdminRequest(ctx, proxyURL, original, body, targetProxyName)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var payload adminErrorPayload
+	if len(respBody) > 0 {
+		_ = json.Unmarshal(respBody, &payload)
+	}
+	return &adminForwardResponse{
+		StatusCode: resp.StatusCode,
+		Body:       respBody,
+		Header:     resp.Header.Clone(),
+		ErrorCode:  strings.TrimSpace(payload.Code),
+	}, nil
+}
+
+func (p *ProxyServer) openForwardAdminRequest(ctx context.Context, proxyURL string, original *http.Request, body []byte, targetProxyName string) (*http.Response, error) {
+	targetURL := strings.TrimRight(strings.TrimSpace(proxyURL), "/") + original.URL.Path
+	if rawQuery := strings.TrimSpace(original.URL.RawQuery); rawQuery != "" {
+		targetURL += "?" + rawQuery
+	}
+	req, err := http.NewRequestWithContext(ctx, original.Method, targetURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header = original.Header.Clone()
+	if strings.TrimSpace(targetProxyName) != "" {
+		req.Header.Set(adminTargetProxyNameHeader, targetProxyName)
+	} else {
+		req.Header.Del(adminTargetProxyNameHeader)
+	}
+	return p.requestClient.Do(req)
+}
+
+func writeForwardedAdminResponse(w http.ResponseWriter, resp *adminForwardResponse) int {
+	for name, values := range resp.Header {
+		lower := strings.ToLower(name)
+		if lower == "content-length" || lower == "transfer-encoding" || lower == "connection" {
+			continue
+		}
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	if len(resp.Body) > 0 {
+		_, _ = w.Write(resp.Body)
+	}
+	return resp.StatusCode
+}
+
+func (p *ProxyServer) streamForwardAdminRequest(w http.ResponseWriter, original *http.Request, proxyURL string, body []byte, targetProxyName string) int {
+	resp, err := p.openForwardAdminRequest(original.Context(), proxyURL, original, body, targetProxyName)
+	if err != nil {
+		writeJSONErrorCode(w, http.StatusBadGateway, adminErrorCodeTargetUnavailable, err.Error())
+		return http.StatusBadGateway
+	}
+	return writeStreamingForwardedAdminResponse(w, resp)
+}
+
+func isTargetNotFoundAdminResponse(resp *http.Response) (bool, error) {
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		return false, nil
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, err
+	}
+	var payload adminErrorPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false, nil
+	}
+	return strings.TrimSpace(payload.Code) == adminErrorCodeTargetNotFound, nil
+}
+
+func writeStreamingForwardedAdminResponse(w http.ResponseWriter, resp *http.Response) int {
+	defer resp.Body.Close()
+	copyForwardHeaders(w.Header(), resp.Header)
+	for name := range resp.Trailer {
+		w.Header().Add("Trailer", name)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(newFlushWriter(w), resp.Body)
+	for name, values := range resp.Trailer {
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
+	return resp.StatusCode
+}
+
+func copyForwardHeaders(dst, src http.Header) {
+	for name, values := range src {
+		lower := strings.ToLower(name)
+		if lower == "content-length" || lower == "transfer-encoding" || lower == "connection" {
+			continue
+		}
+		for _, value := range values {
+			dst.Add(name, value)
+		}
+	}
+}
+
+type flushWriter struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	mu      sync.Mutex
+}
+
+func newFlushWriter(w http.ResponseWriter) *flushWriter {
+	fw := &flushWriter{w: w}
+	if flusher, ok := w.(http.Flusher); ok {
+		fw.flusher = flusher
+	}
+	return fw
+}
+
+func (w *flushWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.w.Write(p)
+	if w.flusher != nil {
+		w.flusher.Flush()
+	}
+	return n, err
+}
+
+func exitCodeFromError(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return 1
 }
 
 func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now time.Time, reqID uint64) {
@@ -360,15 +712,33 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now tim
 	_ = r.Body.Close()
 
 	snapshot := p.store.Snapshot()
-	if hasChildProxyRouting(snapshot) {
-		p.handleHTTPViaChildProxies(w, r, body, snapshot, now, reqID)
-		return
-	}
 	maxAttempts := max(1, snapshot.Settings.Proxy.MaxAttempts)
 
 	var lastResp *http.Response
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if hasChildProxyRouting(snapshot) {
+			route, err := p.selectRoute(r.Context(), snapshot, now, attempt == 1)
+			if err != nil {
+				lastErr = err
+				p.logEvent("request.selection_failed", map[string]any{
+					"req_id":  reqID,
+					"attempt": attempt,
+					"error":   err.Error(),
+				})
+				break
+			}
+			if route.Kind == routeKindChild {
+				if p.handleHTTPViaSelectedChildRoute(w, r, body, snapshot, now, reqID, attempt, maxAttempts, route, &lastResp, &lastErr) {
+					return
+				}
+				continue
+			}
+			if p.handleHTTPViaSelectedLocalRoute(w, r, body, snapshot, now, reqID, attempt, maxAttempts, route, &lastResp, &lastErr) {
+				return
+			}
+			continue
+		}
 		sel, account, auth, err := p.pickAccount(now)
 		if err != nil {
 			lastErr = err
@@ -379,173 +749,9 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now tim
 			})
 			break
 		}
-		p.logEvent("request.account_selected", map[string]any{
-			"req_id":        reqID,
-			"attempt":       attempt,
-			"account_id":    account.ID,
-			"account_alias": account.Alias,
-			"switch_reason": sel.SwitchReason,
-			"switched":      sel.Switched,
-		})
-
-		targetURL, err := rewriteForAccount(r.URL, account.BaseURL)
-		if err != nil {
-			lastErr = err
-			p.logEvent("request.rewrite_failed", map[string]any{
-				"req_id":  reqID,
-				"attempt": attempt,
-				"error":   err.Error(),
-			})
-			break
+		if p.handleHTTPViaPickedAccount(w, r, body, snapshot, now, reqID, attempt, maxAttempts, sel, account, auth, &lastResp, &lastErr) {
+			return
 		}
-
-		upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bytes.NewReader(body))
-		if err != nil {
-			lastErr = err
-			break
-		}
-		upstreamReq.Header = cloneHeaders(r.Header)
-		setAccountHeaders(upstreamReq.Header, auth)
-		upstreamReq.Host = targetURL.Host
-
-		resp, err := p.requestClient.Do(upstreamReq)
-		if err != nil {
-			if isCanceledRequest(r.Context(), err) {
-				p.logEvent("request.canceled", map[string]any{
-					"req_id":     reqID,
-					"attempt":    attempt,
-					"account_id": account.ID,
-					"method":     r.Method,
-					"path":       r.URL.Path,
-					"error":      err.Error(),
-				})
-				return
-			}
-			p.markCooldown(account.ID, 0, snapshot.Settings.Proxy.CooldownDefaultS, "transport-error")
-			lastErr = err
-			p.logEvent("request.transport_error", map[string]any{
-				"req_id":     reqID,
-				"attempt":    attempt,
-				"account_id": account.ID,
-				"error":      err.Error(),
-			})
-			continue
-		}
-
-		if shouldDisableForAuthFailure(resp.StatusCode, r.URL.Path) {
-			bodySnippet := readBodySnippet(resp.Body, maxDisableBodyLogBytes)
-			_ = resp.Body.Close()
-			refreshedAuth, refreshed, refreshErr := p.tryRefreshAccountAuth(r.Context(), account, auth)
-			if refreshErr == nil && refreshed {
-				upstreamReq, err = http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bytes.NewReader(body))
-				if err != nil {
-					lastErr = err
-					break
-				}
-				upstreamReq.Header = cloneHeaders(r.Header)
-				setAccountHeaders(upstreamReq.Header, refreshedAuth)
-				upstreamReq.Host = targetURL.Host
-				resp, err = p.requestClient.Do(upstreamReq)
-				if err != nil {
-					if isCanceledRequest(r.Context(), err) {
-						p.logEvent("request.canceled", map[string]any{
-							"req_id":     reqID,
-							"attempt":    attempt,
-							"account_id": account.ID,
-							"method":     r.Method,
-							"path":       r.URL.Path,
-							"error":      err.Error(),
-						})
-						return
-					}
-					p.markCooldown(account.ID, 0, snapshot.Settings.Proxy.CooldownDefaultS, "transport-error")
-					lastErr = err
-					p.logEvent("request.transport_error", map[string]any{
-						"req_id":     reqID,
-						"attempt":    attempt,
-						"account_id": account.ID,
-						"error":      err.Error(),
-					})
-					continue
-				}
-				if !shouldDisableForAuthFailure(resp.StatusCode, r.URL.Path) {
-					auth = refreshedAuth
-				}
-			}
-			if refreshErr != nil || shouldDisableForAuthFailure(resp.StatusCode, r.URL.Path) {
-				p.markDisabled(account.ID, disabledReasonForAuthFailure(resp.StatusCode, refreshErr))
-				lastResp = resp
-				fields := map[string]any{
-					"req_id":     reqID,
-					"attempt":    attempt,
-					"account_id": account.ID,
-					"status":     resp.StatusCode,
-					"path":       r.URL.Path,
-					"method":     r.Method,
-					"error_body": bodySnippet,
-				}
-				if refreshErr != nil {
-					fields["refresh_error"] = refreshErr.Error()
-				}
-				p.logEvent("account.disabled", fields)
-				if p.logger != nil {
-					if refreshErr != nil {
-						p.logger.Printf("account disabled id=%s status=%d method=%s path=%s body=%q refresh_error=%v", account.ID, resp.StatusCode, r.Method, r.URL.Path, bodySnippet, refreshErr)
-					} else {
-						p.logger.Printf("account disabled id=%s status=%d method=%s path=%s body=%q", account.ID, resp.StatusCode, r.Method, r.URL.Path, bodySnippet)
-					}
-				}
-				continue
-			}
-		}
-
-		if isRetryableStatus(resp.StatusCode) {
-			retryAfter := parseRetryAfterSeconds(resp.Header)
-			cooldown := defaultBackoffSeconds(resp.StatusCode, retryAfter)
-			p.markCooldown(account.ID, resp.StatusCode, cooldown, fmt.Sprintf("http-%d", resp.StatusCode))
-			p.logEvent("account.cooldown", map[string]any{
-				"req_id":             reqID,
-				"attempt":            attempt,
-				"account_id":         account.ID,
-				"status":             resp.StatusCode,
-				"cooldown_seconds":   cooldown,
-				"retry_after_second": retryAfter,
-			})
-			if attempt < maxAttempts {
-				_ = resp.Body.Close()
-				lastResp = resp
-				continue
-			}
-		}
-
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			increment := r.Method == http.MethodPost && strings.Contains(r.URL.Path, "responses")
-			p.markSuccess(sel, account.ID, now, increment)
-			p.logEvent("request.completed", map[string]any{
-				"req_id":     reqID,
-				"status":     resp.StatusCode,
-				"account_id": account.ID,
-				"attempt":    attempt,
-			})
-			if sel.Switched {
-				p.logEvent("request.switched", map[string]any{
-					"req_id":        reqID,
-					"account_id":    account.ID,
-					"switch_reason": sel.SwitchReason,
-					"score_current": sel.Score,
-					"score_best":    sel.BestScore,
-				})
-			}
-		} else {
-			p.logEvent("request.completed", map[string]any{
-				"req_id":     reqID,
-				"status":     resp.StatusCode,
-				"account_id": account.ID,
-				"attempt":    attempt,
-			})
-		}
-		writeResponse(w, resp)
-		return
 	}
 
 	if lastResp != nil {
@@ -571,6 +777,176 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now tim
 	http.Error(w, "no account available", http.StatusServiceUnavailable)
 }
 
+func (p *ProxyServer) handleHTTPViaPickedAccount(w http.ResponseWriter, r *http.Request, body []byte, snapshot StoreFile, now time.Time, reqID uint64, attempt, maxAttempts int, sel Selection, account Account, auth AuthInfo, lastResp **http.Response, lastErr *error) bool {
+	p.logEvent("request.account_selected", map[string]any{
+		"req_id":        reqID,
+		"attempt":       attempt,
+		"account_id":    account.ID,
+		"account_alias": account.Alias,
+		"switch_reason": sel.SwitchReason,
+		"switched":      sel.Switched,
+	})
+
+	targetURL, err := rewriteForAccount(r.URL, account.BaseURL)
+	if err != nil {
+		*lastErr = err
+		p.logEvent("request.rewrite_failed", map[string]any{
+			"req_id":  reqID,
+			"attempt": attempt,
+			"error":   err.Error(),
+		})
+		return false
+	}
+
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bytes.NewReader(body))
+	if err != nil {
+		*lastErr = err
+		return false
+	}
+	upstreamReq.Header = cloneHeaders(r.Header)
+	setAccountHeaders(upstreamReq.Header, auth)
+	upstreamReq.Host = targetURL.Host
+
+	resp, err := p.requestClient.Do(upstreamReq)
+	if err != nil {
+		if isCanceledRequest(r.Context(), err) {
+			p.logEvent("request.canceled", map[string]any{
+				"req_id":     reqID,
+				"attempt":    attempt,
+				"account_id": account.ID,
+				"method":     r.Method,
+				"path":       r.URL.Path,
+				"error":      err.Error(),
+			})
+			return true
+		}
+		p.markCooldown(account.ID, 0, snapshot.Settings.Proxy.CooldownDefaultS, "transport-error")
+		*lastErr = err
+		p.logEvent("request.transport_error", map[string]any{
+			"req_id":     reqID,
+			"attempt":    attempt,
+			"account_id": account.ID,
+			"error":      err.Error(),
+		})
+		return false
+	}
+
+	if shouldDisableForAuthFailure(resp.StatusCode, r.URL.Path) {
+		bodySnippet := readBodySnippet(resp.Body, maxDisableBodyLogBytes)
+		_ = resp.Body.Close()
+		refreshedAuth, refreshed, refreshErr := p.tryRefreshAccountAuth(r.Context(), account, auth)
+		if refreshErr == nil && refreshed {
+			upstreamReq, err = http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bytes.NewReader(body))
+			if err != nil {
+				*lastErr = err
+				return false
+			}
+			upstreamReq.Header = cloneHeaders(r.Header)
+			setAccountHeaders(upstreamReq.Header, refreshedAuth)
+			upstreamReq.Host = targetURL.Host
+			resp, err = p.requestClient.Do(upstreamReq)
+			if err != nil {
+				if isCanceledRequest(r.Context(), err) {
+					p.logEvent("request.canceled", map[string]any{
+						"req_id":     reqID,
+						"attempt":    attempt,
+						"account_id": account.ID,
+						"method":     r.Method,
+						"path":       r.URL.Path,
+						"error":      err.Error(),
+					})
+					return true
+				}
+				p.markCooldown(account.ID, 0, snapshot.Settings.Proxy.CooldownDefaultS, "transport-error")
+				*lastErr = err
+				p.logEvent("request.transport_error", map[string]any{
+					"req_id":     reqID,
+					"attempt":    attempt,
+					"account_id": account.ID,
+					"error":      err.Error(),
+				})
+				return false
+			}
+			if !shouldDisableForAuthFailure(resp.StatusCode, r.URL.Path) {
+				auth = refreshedAuth
+			}
+		}
+		if refreshErr != nil || shouldDisableForAuthFailure(resp.StatusCode, r.URL.Path) {
+			p.markDisabled(account.ID, disabledReasonForAuthFailure(resp.StatusCode, refreshErr))
+			*lastResp = resp
+			fields := map[string]any{
+				"req_id":     reqID,
+				"attempt":    attempt,
+				"account_id": account.ID,
+				"status":     resp.StatusCode,
+				"path":       r.URL.Path,
+				"method":     r.Method,
+				"error_body": bodySnippet,
+			}
+			if refreshErr != nil {
+				fields["refresh_error"] = refreshErr.Error()
+			}
+			p.logEvent("account.disabled", fields)
+			if p.logger != nil {
+				if refreshErr != nil {
+					p.logger.Printf("account disabled id=%s status=%d method=%s path=%s body=%q refresh_error=%v", account.ID, resp.StatusCode, r.Method, r.URL.Path, bodySnippet, refreshErr)
+				} else {
+					p.logger.Printf("account disabled id=%s status=%d method=%s path=%s body=%q", account.ID, resp.StatusCode, r.Method, r.URL.Path, bodySnippet)
+				}
+			}
+			return false
+		}
+	}
+
+	if isRetryableStatus(resp.StatusCode) {
+		retryAfter := parseRetryAfterSeconds(resp.Header)
+		cooldown := defaultBackoffSeconds(resp.StatusCode, retryAfter)
+		p.markCooldown(account.ID, resp.StatusCode, cooldown, fmt.Sprintf("http-%d", resp.StatusCode))
+		p.logEvent("account.cooldown", map[string]any{
+			"req_id":             reqID,
+			"attempt":            attempt,
+			"account_id":         account.ID,
+			"status":             resp.StatusCode,
+			"cooldown_seconds":   cooldown,
+			"retry_after_second": retryAfter,
+		})
+		if attempt < maxAttempts {
+			_ = resp.Body.Close()
+			*lastResp = resp
+			return false
+		}
+	}
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		increment := r.Method == http.MethodPost && strings.Contains(r.URL.Path, "responses")
+		p.markSuccess(sel, account.ID, now, increment)
+		p.logEvent("request.completed", map[string]any{
+			"req_id":     reqID,
+			"status":     resp.StatusCode,
+			"account_id": account.ID,
+			"attempt":    attempt,
+		})
+		if sel.Switched {
+			p.logEvent("request.switched", map[string]any{
+				"req_id":        reqID,
+				"account_id":    account.ID,
+				"switch_reason": sel.SwitchReason,
+				"score_current": sel.Score,
+				"score_best":    sel.BestScore,
+			})
+		}
+	} else {
+		p.logEvent("request.completed", map[string]any{
+			"req_id":     reqID,
+			"status":     resp.StatusCode,
+			"account_id": account.ID,
+			"attempt":    attempt,
+		})
+	}
+	writeResponse(w, resp)
+	return true
+}
+
 func isCanceledRequest(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
@@ -581,7 +957,30 @@ func isCanceledRequest(ctx context.Context, err error) bool {
 func (p *ProxyServer) handleWebsocket(w http.ResponseWriter, r *http.Request, now time.Time, reqID uint64) {
 	snapshot := p.store.Snapshot()
 	if hasChildProxyRouting(snapshot) {
-		p.handleWebsocketViaChildProxy(w, r, snapshot, now, reqID)
+		route, err := p.selectRoute(r.Context(), snapshot, now, true)
+		if err != nil {
+			p.logEvent("websocket.selection_failed", map[string]any{
+				"req_id": reqID,
+				"error":  err.Error(),
+			})
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if route.Kind == routeKindChild {
+			p.handleWebsocketViaSelectedChildProxy(w, r, snapshot, now, reqID, route)
+			return
+		}
+		auth, err := p.loadAuthForAccount(route.Account)
+		if err != nil {
+			p.logEvent("websocket.selection_failed", map[string]any{
+				"req_id":     reqID,
+				"account_id": route.Account.ID,
+				"error":      err.Error(),
+			})
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		p.handleWebsocketViaSelectedAccount(w, r, now, reqID, route.Selection, route.Account, auth)
 		return
 	}
 
@@ -594,6 +993,10 @@ func (p *ProxyServer) handleWebsocket(w http.ResponseWriter, r *http.Request, no
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	p.handleWebsocketViaSelectedAccount(w, r, now, reqID, sel, account, auth)
+}
+
+func (p *ProxyServer) handleWebsocketViaSelectedAccount(w http.ResponseWriter, r *http.Request, now time.Time, reqID uint64, sel Selection, account Account, auth AuthInfo) {
 	p.logEvent("websocket.account_selected", map[string]any{
 		"req_id":        reqID,
 		"account_id":    account.ID,
@@ -679,10 +1082,18 @@ func (p *ProxyServer) pickAccount(now time.Time) (Selection, Account, AuthInfo, 
 		return Selection{}, Account{}, AuthInfo{}, fmt.Errorf("invalid selected account index")
 	}
 	account := snapshot.Accounts[sel.Index]
+	auth, err := p.loadAuthForAccount(account)
+	if err != nil {
+		return Selection{}, Account{}, AuthInfo{}, err
+	}
+	return sel, account, auth, nil
+}
+
+func (p *ProxyServer) loadAuthForAccount(account Account) (AuthInfo, error) {
 	auth, err := LoadAuth(account.HomeDir)
 	if err != nil {
 		p.markDisabled(account.ID, "missing-auth")
-		return Selection{}, Account{}, AuthInfo{}, err
+		return AuthInfo{}, err
 	}
 
 	if auth.ChatGPTAccountID != "" && auth.ChatGPTAccountID != account.ChatGPTAccountID {
@@ -698,7 +1109,7 @@ func (p *ProxyServer) pickAccount(now time.Time) (Selection, Account, AuthInfo, 
 			return nil
 		})
 	}
-	return sel, account, auth, nil
+	return auth, nil
 }
 
 func (p *ProxyServer) markSuccess(sel Selection, accountID string, now time.Time, incrementMessage bool) {
@@ -721,6 +1132,7 @@ func (p *ProxyServer) markSuccess(sel Selection, accountID string, now time.Time
 		}
 		return nil
 	})
+	p.markLocalRouteActive(accountID)
 }
 
 func (p *ProxyServer) markCooldown(accountID string, _ int, cooldownSeconds int, reason string) {

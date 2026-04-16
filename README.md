@@ -303,13 +303,17 @@ Create/use `~/.codex-lb/accounts/<alias>` as `CODEX_HOME` and execute login comm
 Usage:
 
 ```bash
-codexlb account login [--root DIR] [--proxy-url URL] [--codex-bin PATH] <alias> [-- <extra-login-args...>]
+codexlb account login [--root DIR] [--proxy-url URL] [--proxy-name NAME] [--codex-bin PATH] <alias> [-- <extra-login-args...>]
 ```
 
 Notes:
 
 - `commands.login` is prepended before extra args.
 - With `--proxy-url`, runs login locally and uploads the resulting account data to the remote proxy.
+- `--proxy-name` targets a named proxy recursively from the configured proxy chain rooted at `--proxy-url`, `CODEXLB_PROXY_URL`, or `proxy.proxy_url`.
+- The CLI sends the target name to the root proxy admin API; proxies forward recursively, so child proxy URLs do not need to be reachable from the CLI host.
+- With `--proxy-name`, the login itself runs on the target proxy, which is required when auth must happen from that proxy's network namespace.
+- With `--proxy-name` and no extra login args, the target proxy defaults to device auth when its configured `commands.login` does not already include `--device-auth`, and streams the device-login output back to the CLI.
 
 ### `codexlb account import`
 
@@ -318,7 +322,7 @@ Import an existing Codex home auth.
 Usage:
 
 ```bash
-codexlb account import [--root DIR] [--proxy-url URL] [--into local|proxy] [--from <CODEX_HOME>] [<alias>]
+codexlb account import [--root DIR] [--proxy-url URL] [--proxy-name NAME] [--into local|proxy] [--from <CODEX_HOME>] [<alias>]
 ```
 
 Notes:
@@ -328,7 +332,8 @@ Notes:
 - If `<alias>` is omitted, codexlb derives one from the source `config.toml`/auth when possible, otherwise generates a random alias.
 - `--into local` imports into the local store under `~/.codex-lb/accounts/<alias>` (or `--root`).
 - `--into proxy` uploads the local `auth.json` and optional `config.toml` to the remote proxy admin API.
-- `--into proxy` requires `--proxy-url`, `CODEXLB_PROXY_URL`, or `proxy.proxy_url`.
+- `--into proxy` requires `--proxy-url`, `--proxy-name`, `CODEXLB_PROXY_URL`, or `proxy.proxy_url`.
+- When `--proxy-name` is used, the selected root proxy forwards the import recursively to the named child proxy.
 
 ### `codexlb account list`
 
@@ -337,7 +342,7 @@ List enrolled accounts and health/state summary.
 Usage:
 
 ```bash
-codexlb account list [--root DIR] [--proxy-url URL]
+codexlb account list [--root DIR] [--proxy-url URL] [--proxy-name NAME]
 ```
 
 ### `codexlb account rm`
@@ -347,7 +352,7 @@ Remove account and its stored account directory.
 Usage:
 
 ```bash
-codexlb account rm [--root DIR] [--proxy-url URL] <alias>
+codexlb account rm [--root DIR] [--proxy-url URL] [--proxy-name NAME] <alias>
 ```
 
 ### `codexlb account pin`
@@ -357,7 +362,7 @@ Pin selection to a specific account alias.
 Usage:
 
 ```bash
-codexlb account pin [--root DIR] [--proxy-url URL] <alias>
+codexlb account pin [--root DIR] [--proxy-url URL] [--proxy-name NAME] <alias>
 ```
 
 ### `codexlb account unpin`
@@ -367,7 +372,7 @@ Clear pinned account selection.
 Usage:
 
 ```bash
-codexlb account unpin [--root DIR] [--proxy-url URL]
+codexlb account unpin [--root DIR] [--proxy-url URL] [--proxy-name NAME]
 ```
 
 ### `codexlb login-with`

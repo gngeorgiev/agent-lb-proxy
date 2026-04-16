@@ -337,6 +337,7 @@ func runAccountLogin(argv []string) int {
 	fs := flag.NewFlagSet("account login", flag.ContinueOnError)
 	root := fs.String("root", defaultRootFlagValue(), "State directory (default: $CODEXLB_ROOT or ~/.codex-lb)")
 	proxyURL := fs.String("proxy-url", defaultProxyURLFlagValue(), "Remote proxy admin URL (default: $CODEXLB_PROXY_URL)")
+	proxyName := fs.String("proxy-name", "", "Proxy name to target within the configured proxy chain")
 	codexBin := fs.String("codex-bin", os.Getenv("CODEXLB_CODEX_BIN"), "Codex executable path")
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), `Usage: codexlb account login [flags] <alias> [-- <codex-login-args...>]
@@ -360,23 +361,23 @@ Flags:
 	if len(args) > 1 {
 		loginArgs = args[1:]
 	}
+	loginArgs = sanitizeLoginArgs(loginArgs)
 	store, err := lb.OpenStore(*root)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open store: %v\n", err)
 		return 1
 	}
-	if strings.TrimSpace(*proxyURL) != "" {
-		resp, err := loginAccountRemote(store, *proxyURL, alias, *codexBin, loginArgs)
+	targetProxyURL := resolveAccountAdminTargetURL(store, *proxyURL, strings.TrimSpace(*proxyName))
+	if targetProxyURL != "" {
+		err := remoteAdminLoginStreamWithClient(http.DefaultClient, targetProxyURL, strings.TrimSpace(*proxyName), alias, *codexBin, loginArgs, os.Stdout)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "login account (remote): %v\n", err)
 			return 1
 		}
-		fmt.Printf("registered account %s (total=%d)\n", alias, resp.Total)
 		return 0
 	}
 	if shouldAutoRemoteAccount(store, *root) {
-		if resp, err := tryRemoteLoginWithFallback(store, alias, *codexBin, loginArgs); err == nil {
-			fmt.Printf("registered account %s (total=%d)\n", alias, resp.Total)
+		if err := tryRemoteLoginWithFallback(store, alias, *codexBin, loginArgs); err == nil {
 			return 0
 		} else if !isRemoteAdminUnavailable(err) {
 			fmt.Fprintf(os.Stderr, "login account (remote): %v\n", err)
@@ -396,6 +397,7 @@ func runAccountImport(argv []string) int {
 	fs := flag.NewFlagSet("account import", flag.ContinueOnError)
 	root := fs.String("root", defaultRootFlagValue(), "State directory (default: $CODEXLB_ROOT or ~/.codex-lb)")
 	proxyURL := fs.String("proxy-url", defaultProxyURLFlagValue(), "Remote proxy admin URL (default: $CODEXLB_PROXY_URL)")
+	proxyName := fs.String("proxy-name", "", "Proxy name to target within the configured proxy chain")
 	from := fs.String("from", "", "Existing CODEX_HOME directory to import from (default: $CODEX_HOME or ~/.codex)")
 	into := fs.String("into", "local", "Import target: local or proxy")
 	fs.Usage = func() {
@@ -450,23 +452,21 @@ Flags:
 	}
 
 	if target == "proxy" {
-		targetProxyURL := strings.TrimSpace(*proxyURL)
-		if targetProxyURL == "" {
-			store, err := openStore()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "open store: %v\n", err)
-				return 1
-			}
-			if shouldAutoRemoteAccount(store, *root) {
-				targetProxyURL = strings.TrimSpace(store.Snapshot().Settings.ProxyURL)
-			}
+		store, err := openStore()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+			return 1
+		}
+		targetProxyURL := resolveAccountAdminTargetURL(store, *proxyURL, strings.TrimSpace(*proxyName))
+		if targetProxyURL == "" && shouldAutoRemoteAccount(store, *root) {
+			targetProxyURL = strings.TrimSpace(store.Snapshot().Settings.ProxyURL)
 		}
 		if strings.TrimSpace(targetProxyURL) == "" {
-			fmt.Fprintln(os.Stderr, "account import: --into=proxy requires --proxy-url, $CODEXLB_PROXY_URL, or proxy.proxy_url")
+			fmt.Fprintln(os.Stderr, "account import: --into=proxy requires --proxy-url, --proxy-name, $CODEXLB_PROXY_URL, or proxy.proxy_url")
 			return 2
 		}
-		alias = resolveImportAlias(alias, sourceHome, remoteImportAliasSet(targetProxyURL))
-		resp, err := remoteAdminImportHome(targetProxyURL, alias, sourceHome)
+		alias = resolveImportAlias(alias, sourceHome, remoteImportAliasSet(targetProxyURL, strings.TrimSpace(*proxyName)))
+		resp, err := remoteAdminImportHomeWithClient(http.DefaultClient, targetProxyURL, strings.TrimSpace(*proxyName), alias, sourceHome)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "import account (remote): %v\n", err)
 			return 1
@@ -494,6 +494,7 @@ func runAccountList(argv []string) int {
 	fs := flag.NewFlagSet("account list", flag.ContinueOnError)
 	root := fs.String("root", defaultRootFlagValue(), "State directory (default: $CODEXLB_ROOT or ~/.codex-lb)")
 	proxyURL := fs.String("proxy-url", defaultProxyURLFlagValue(), "Remote proxy admin URL (default: $CODEXLB_PROXY_URL)")
+	proxyName := fs.String("proxy-name", "", "Proxy name to target within the configured proxy chain")
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), `Usage: codexlb account list [flags]
 
@@ -506,8 +507,19 @@ Flags:
 	if err := fs.Parse(argv); err != nil {
 		return parseFlagError(err)
 	}
-	if strings.TrimSpace(*proxyURL) != "" {
-		accounts, err := remoteAdminListAccounts(*proxyURL)
+	var store *lb.Store
+	targetProxyURL := strings.TrimSpace(*proxyURL)
+	if targetProxyURL == "" && strings.TrimSpace(*proxyName) != "" {
+		var err error
+		store, err = lb.OpenStore(*root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+			return 1
+		}
+		targetProxyURL = resolveAccountAdminTargetURL(store, "", strings.TrimSpace(*proxyName))
+	}
+	if targetProxyURL != "" {
+		accounts, err := remoteAdminListAccountsWithClient(http.DefaultClient, targetProxyURL, strings.TrimSpace(*proxyName))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "list accounts (remote): %v\n", err)
 			return 1
@@ -515,10 +527,13 @@ Flags:
 		printAccountList(accounts)
 		return 0
 	}
-	store, err := lb.OpenStore(*root)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open store: %v\n", err)
-		return 1
+	var err error
+	if store == nil {
+		store, err = lb.OpenStore(*root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+			return 1
+		}
 	}
 	if shouldAutoRemoteAccount(store, *root) {
 		if accounts, err := tryRemoteListWithFallback(store); err == nil {
@@ -537,6 +552,7 @@ func runAccountRemove(argv []string) int {
 	fs := flag.NewFlagSet("account rm", flag.ContinueOnError)
 	root := fs.String("root", defaultRootFlagValue(), "State directory (default: $CODEXLB_ROOT or ~/.codex-lb)")
 	proxyURL := fs.String("proxy-url", defaultProxyURLFlagValue(), "Remote proxy admin URL (default: $CODEXLB_PROXY_URL)")
+	proxyName := fs.String("proxy-name", "", "Proxy name to target within the configured proxy chain")
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), `Usage: codexlb account rm [flags] <alias>
 
@@ -554,18 +570,32 @@ Flags:
 		fs.Usage()
 		return 2
 	}
-	if strings.TrimSpace(*proxyURL) != "" {
-		if _, err := remoteAdminRemove(*proxyURL, args[0]); err != nil {
+	var store *lb.Store
+	targetProxyURL := strings.TrimSpace(*proxyURL)
+	if targetProxyURL == "" && strings.TrimSpace(*proxyName) != "" {
+		var err error
+		store, err = lb.OpenStore(*root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+			return 1
+		}
+		targetProxyURL = resolveAccountAdminTargetURL(store, "", strings.TrimSpace(*proxyName))
+	}
+	if targetProxyURL != "" {
+		if _, err := remoteAdminRemoveWithClient(http.DefaultClient, targetProxyURL, strings.TrimSpace(*proxyName), args[0]); err != nil {
 			fmt.Fprintf(os.Stderr, "remove account (remote): %v\n", err)
 			return 1
 		}
 		fmt.Printf("removed account %s\n", args[0])
 		return 0
 	}
-	store, err := lb.OpenStore(*root)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open store: %v\n", err)
-		return 1
+	var err error
+	if store == nil {
+		store, err = lb.OpenStore(*root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+			return 1
+		}
 	}
 	if shouldAutoRemoteAccount(store, *root) {
 		if _, err := tryRemoteRemoveWithFallback(store, args[0]); err == nil {
@@ -603,6 +633,7 @@ func runPinCommand(argv []string, flagSetName, usage, errPrefix, successFormat s
 	fs := flag.NewFlagSet(flagSetName, flag.ContinueOnError)
 	root := fs.String("root", defaultRootFlagValue(), "State directory (default: $CODEXLB_ROOT or ~/.codex-lb)")
 	proxyURL := fs.String("proxy-url", defaultProxyURLFlagValue(), "Remote proxy admin URL (default: $CODEXLB_PROXY_URL)")
+	proxyName := fs.String("proxy-name", "", "Proxy name to target within the configured proxy chain")
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), usage)
 		fs.PrintDefaults()
@@ -616,8 +647,19 @@ func runPinCommand(argv []string, flagSetName, usage, errPrefix, successFormat s
 		return 2
 	}
 	alias := args[0]
-	if strings.TrimSpace(*proxyURL) != "" {
-		if _, err := remoteAdminPin(*proxyURL, alias); err != nil {
+	var store *lb.Store
+	targetProxyURL := strings.TrimSpace(*proxyURL)
+	if targetProxyURL == "" && strings.TrimSpace(*proxyName) != "" {
+		var err error
+		store, err = lb.OpenStore(*root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+			return 1
+		}
+		targetProxyURL = resolveAccountAdminTargetURL(store, "", strings.TrimSpace(*proxyName))
+	}
+	if targetProxyURL != "" {
+		if _, err := remoteAdminPinWithClient(http.DefaultClient, targetProxyURL, strings.TrimSpace(*proxyName), alias); err != nil {
 			fmt.Fprintf(os.Stderr, "%s (remote): %v\n", errPrefix, err)
 			return 1
 		}
@@ -625,10 +667,13 @@ func runPinCommand(argv []string, flagSetName, usage, errPrefix, successFormat s
 		return 0
 	}
 
-	store, err := lb.OpenStore(*root)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open store: %v\n", err)
-		return 1
+	var err error
+	if store == nil {
+		store, err = lb.OpenStore(*root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+			return 1
+		}
 	}
 	if shouldAutoRemoteAccount(store, *root) {
 		if err := tryRemotePinWithFallback(store, alias); err == nil {
@@ -666,6 +711,7 @@ func runAccountUnpin(argv []string) int {
 	fs := flag.NewFlagSet("account unpin", flag.ContinueOnError)
 	root := fs.String("root", defaultRootFlagValue(), "State directory (default: $CODEXLB_ROOT or ~/.codex-lb)")
 	proxyURL := fs.String("proxy-url", defaultProxyURLFlagValue(), "Remote proxy admin URL (default: $CODEXLB_PROXY_URL)")
+	proxyName := fs.String("proxy-name", "", "Proxy name to target within the configured proxy chain")
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), `Usage: codexlb account unpin [flags]
 
@@ -682,8 +728,19 @@ Flags:
 		fs.Usage()
 		return 2
 	}
-	if strings.TrimSpace(*proxyURL) != "" {
-		if _, err := remoteAdminUnpin(*proxyURL); err != nil {
+	var store *lb.Store
+	targetProxyURL := strings.TrimSpace(*proxyURL)
+	if targetProxyURL == "" && strings.TrimSpace(*proxyName) != "" {
+		var err error
+		store, err = lb.OpenStore(*root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+			return 1
+		}
+		targetProxyURL = resolveAccountAdminTargetURL(store, "", strings.TrimSpace(*proxyName))
+	}
+	if targetProxyURL != "" {
+		if _, err := remoteAdminUnpinWithClient(http.DefaultClient, targetProxyURL, strings.TrimSpace(*proxyName)); err != nil {
 			fmt.Fprintf(os.Stderr, "unpin account (remote): %v\n", err)
 			return 1
 		}
@@ -691,10 +748,13 @@ Flags:
 		return 0
 	}
 
-	store, err := lb.OpenStore(*root)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open store: %v\n", err)
-		return 1
+	var err error
+	if store == nil {
+		store, err = lb.OpenStore(*root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open store: %v\n", err)
+			return 1
+		}
 	}
 	if shouldAutoRemoteAccount(store, *root) {
 		if err := tryRemoteUnpinWithFallback(store); err == nil {
@@ -826,47 +886,30 @@ Examples:
 
 func tryRemotePinWithFallback(store *lb.Store, alias string) error {
 	client := remoteAdminFallbackClient()
-	_, err := remoteAdminPinWithClient(client, resolveProxyURL(store, ""), alias)
+	_, err := remoteAdminPinWithClient(client, resolveProxyURL(store, ""), "", alias)
 	return err
 }
 
 func tryRemoteUnpinWithFallback(store *lb.Store) error {
 	client := remoteAdminFallbackClient()
-	_, err := remoteAdminUnpinWithClient(client, resolveProxyURL(store, ""))
+	_, err := remoteAdminUnpinWithClient(client, resolveProxyURL(store, ""), "")
 	return err
 }
 
-func tryRemoteLoginWithFallback(store *lb.Store, alias, codexBin string, loginArgs []string) (lb.AdminMutationResponse, error) {
-	return loginAccountRemoteWithClient(store, remoteAdminFallbackClient(), resolveProxyURL(store, ""), alias, codexBin, loginArgs)
+func tryRemoteLoginWithFallback(store *lb.Store, alias, codexBin string, loginArgs []string) error {
+	return remoteAdminLoginStreamWithClient(remoteAdminFallbackClient(), resolveProxyURL(store, ""), "", alias, codexBin, loginArgs, os.Stdout)
 }
 
 func tryRemoteImportWithFallback(store *lb.Store, alias, from string) (lb.AdminMutationResponse, error) {
-	return remoteAdminImportWithClient(remoteAdminFallbackClient(), resolveProxyURL(store, ""), alias, from)
-}
-
-func loginAccountRemote(store *lb.Store, proxyURL, alias, codexBin string, loginArgs []string) (lb.AdminMutationResponse, error) {
-	return loginAccountRemoteWithClient(store, http.DefaultClient, proxyURL, alias, codexBin, loginArgs)
-}
-
-func loginAccountRemoteWithClient(store *lb.Store, client *http.Client, proxyURL, alias, codexBin string, loginArgs []string) (lb.AdminMutationResponse, error) {
-	loginHome, err := os.MkdirTemp("", "codexlb-login-*")
-	if err != nil {
-		return lb.AdminMutationResponse{}, fmt.Errorf("create temp login home: %w", err)
-	}
-	defer os.RemoveAll(loginHome)
-
-	if err := lb.LoginAccountToHome(store, alias, loginHome, codexBin, loginArgs); err != nil {
-		return lb.AdminMutationResponse{}, err
-	}
-	return remoteAdminImportHomeWithClient(client, proxyURL, alias, loginHome)
+	return remoteAdminImportWithClient(remoteAdminFallbackClient(), resolveProxyURL(store, ""), "", alias, from)
 }
 
 func tryRemoteListWithFallback(store *lb.Store) ([]lb.Account, error) {
-	return remoteAdminListAccountsWithClient(remoteAdminFallbackClient(), resolveProxyURL(store, ""))
+	return remoteAdminListAccountsWithClient(remoteAdminFallbackClient(), resolveProxyURL(store, ""), "")
 }
 
 func tryRemoteRemoveWithFallback(store *lb.Store, alias string) (lb.AdminMutationResponse, error) {
-	return remoteAdminRemoveWithClient(remoteAdminFallbackClient(), resolveProxyURL(store, ""), alias)
+	return remoteAdminRemoveWithClient(remoteAdminFallbackClient(), resolveProxyURL(store, ""), "", alias)
 }
 
 func remoteAdminFallbackClient() *http.Client {
@@ -1049,6 +1092,20 @@ func resolveProxyURL(store *lb.Store, proxyURL string) string {
 	return "http://" + snapshot.Settings.Proxy.Listen
 }
 
+func resolveAccountAdminTargetURL(store *lb.Store, proxyURL, proxyName string) string {
+	if url := strings.TrimSpace(proxyURL); url != "" {
+		return url
+	}
+	snapshot := store.Snapshot()
+	if url := strings.TrimSpace(snapshot.Settings.ProxyURL); url != "" {
+		return url
+	}
+	if strings.TrimSpace(proxyName) != "" {
+		return "http://" + snapshot.Settings.Proxy.Listen
+	}
+	return ""
+}
+
 func printStatusShort(status lb.ProxyStatus) {
 	active := "none"
 	for _, a := range status.Accounts {
@@ -1200,6 +1257,14 @@ func defaultProxyURLFlagValue() string {
 	return strings.TrimSpace(os.Getenv("CODEXLB_PROXY_URL"))
 }
 
+func sanitizeLoginArgs(args []string) []string {
+	out := append([]string(nil), args...)
+	if len(out) > 0 && out[0] == "--" {
+		out = out[1:]
+	}
+	return out
+}
+
 func resolveAccountImportSourceHome(from string) (string, error) {
 	from = strings.TrimSpace(from)
 	if from != "" {
@@ -1341,8 +1406,8 @@ func localImportAliasSet(store *lb.Store) map[string]struct{} {
 	return taken
 }
 
-func remoteImportAliasSet(proxyURL string) map[string]struct{} {
-	accounts, err := remoteAdminListAccountsWithClient(remoteAdminFallbackClient(), proxyURL)
+func remoteImportAliasSet(proxyURL, targetProxyName string) map[string]struct{} {
+	accounts, err := remoteAdminListAccountsWithClient(remoteAdminFallbackClient(), proxyURL, targetProxyName)
 	if err != nil {
 		return nil
 	}
