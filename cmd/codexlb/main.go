@@ -1265,7 +1265,7 @@ func printStatusTable(status lb.ProxyStatus) {
 			email = a.Email
 		}
 		lastSwitch := "-"
-		if a.LastSwitchReason != "" {
+		if a.LastSwitchReason != "" && !hideStaleLastSwitchReason(a) {
 			lastSwitch = a.LastSwitchReason
 		}
 		quota := "-"
@@ -1314,6 +1314,18 @@ func printStatusTable(status lb.ProxyStatus) {
 		)
 	}
 	_ = childWriter.Flush()
+}
+
+func hideStaleLastSwitchReason(a lb.AccountStatus) bool {
+	if a.DisabledReason != "" || a.CooldownSeconds > 0 {
+		return false
+	}
+	switch a.LastSwitchReason {
+	case "websocket-proxy-error", "transport-error":
+		return true
+	default:
+		return false
+	}
 }
 
 func formatStatusResetAt(ts int64) string {

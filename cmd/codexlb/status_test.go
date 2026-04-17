@@ -95,6 +95,47 @@ func TestStatusCommandAggregateUsageLeftAveragesAccounts(t *testing.T) {
 	}
 }
 
+func TestStatusCommandHidesExpiredTransientLastSwitchReason(t *testing.T) {
+	status := lb.ProxyStatus{
+		ProxyName:   "main",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Policy:      lb.PolicyConfig{Mode: lb.PolicyUsageBalanced},
+		Accounts: []lb.AccountStatus{
+			{
+				ProxyName:        "main",
+				Alias:            "g99517399",
+				ID:               "openai:g99517399",
+				Email:            "g99517399@gmail.com",
+				Enabled:          true,
+				Healthy:          true,
+				CooldownSeconds:  0,
+				DailyLeftPct:     64,
+				WeeklyLeftPct:    94,
+				Score:            0.760,
+				LastSwitchReason: "websocket-proxy-error",
+				QuotaSource:      "openai_usage_api",
+			},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(status)
+	}))
+	defer server.Close()
+
+	out, code := captureStdout(func() int {
+		return run([]string{"status", "--root", t.TempDir(), "--proxy-url", server.URL})
+	})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d output=%s", code, out)
+	}
+	if !strings.Contains(out, "ready") {
+		t.Fatalf("expected ready state in output: %s", out)
+	}
+	if strings.Contains(out, "websocket-proxy-error") {
+		t.Fatalf("expected expired websocket-proxy-error to be hidden: %s", out)
+	}
+}
+
 func TestStatusCommandJSON(t *testing.T) {
 	status := lb.ProxyStatus{GeneratedAt: time.Now().UTC().Format(time.RFC3339), Accounts: []lb.AccountStatus{{Alias: "a", ID: "id-a"}}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
