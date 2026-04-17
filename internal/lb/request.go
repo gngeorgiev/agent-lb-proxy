@@ -1,7 +1,9 @@
 package lb
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -108,4 +110,69 @@ func defaultBackoffSeconds(status int, fallback int) int {
 		return fallback
 	}
 	return 2
+}
+
+func maybeBackfillModelsDisplayNames(requestPath string, resp *http.Response) error {
+	if !isModelsPath(requestPath) || resp == nil || resp.Body == nil {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "json") {
+		return nil
+	}
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+
+	updated, changed, err := backfillModelsDisplayNamesJSON(raw)
+	if err != nil || !changed {
+		resp.Body = io.NopCloser(strings.NewReader(string(raw)))
+		return err
+	}
+
+	resp.Body = io.NopCloser(strings.NewReader(string(updated)))
+	resp.ContentLength = int64(len(updated))
+	resp.Header.Del("Content-Length")
+	return nil
+}
+
+func backfillModelsDisplayNamesJSON(raw []byte) ([]byte, bool, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, false, err
+	}
+
+	models, _ := payload["models"].([]any)
+	changed := false
+	for _, entry := range models {
+		model, _ := entry.(map[string]any)
+		if model == nil {
+			continue
+		}
+		if strings.TrimSpace(stringField(model["display_name"])) != "" {
+			continue
+		}
+		if title := strings.TrimSpace(stringField(model["title"])); title != "" {
+			model["display_name"] = title
+			changed = true
+		}
+	}
+	if !changed {
+		return raw, false, nil
+	}
+	updated, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false, err
+	}
+	return updated, true, nil
+}
+
+func isModelsPath(requestPath string) bool {
+	requestPath = strings.ToLower(requestPath)
+	return requestPath == "/models" || strings.HasSuffix(requestPath, "/models")
 }

@@ -776,7 +776,7 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, now tim
 			"req_id": reqID,
 			"status": lastResp.StatusCode,
 		})
-		writeResponse(w, lastResp)
+		writeResponse(w, r.URL.Path, lastResp)
 		return
 	}
 	if lastErr != nil {
@@ -960,7 +960,7 @@ func (p *ProxyServer) handleHTTPViaPickedAccount(w http.ResponseWriter, r *http.
 			"attempt":    attempt,
 		})
 	}
-	writeResponse(w, resp)
+	writeResponse(w, r.URL.Path, resp)
 	return true
 }
 
@@ -1503,8 +1503,14 @@ func (p *ProxyServer) logEvent(event string, fields map[string]any) {
 	}
 }
 
-func writeResponse(w http.ResponseWriter, resp *http.Response) {
+func writeResponse(w http.ResponseWriter, requestPath string, resp *http.Response) {
 	defer resp.Body.Close()
+	if err := maybeBackfillModelsDisplayNames(requestPath, resp); err != nil {
+		resp.Body = io.NopCloser(strings.NewReader(`{"error":"invalid models response"}`))
+		resp.StatusCode = http.StatusBadGateway
+		resp.Header = make(http.Header)
+		resp.Header.Set("Content-Type", "application/json")
+	}
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)

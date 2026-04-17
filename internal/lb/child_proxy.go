@@ -716,7 +716,7 @@ func (p *ProxyServer) handleHTTPViaChildProxies(w http.ResponseWriter, r *http.R
 			"child_proxy_url": child.URL,
 			"attempt":         attempt,
 		})
-		writeResponse(w, resp)
+		writeResponse(w, r.URL.Path, resp)
 		return
 	}
 
@@ -725,7 +725,7 @@ func (p *ProxyServer) handleHTTPViaChildProxies(w http.ResponseWriter, r *http.R
 			"req_id": reqID,
 			"status": lastResp.StatusCode,
 		})
-		writeResponse(w, lastResp)
+		writeResponse(w, r.URL.Path, lastResp)
 		return
 	}
 	if lastErr != nil {
@@ -824,7 +824,7 @@ func (p *ProxyServer) handleHTTPViaSelectedChildRoute(w http.ResponseWriter, r *
 		"child_proxy_url": child.URL,
 		"attempt":         attempt,
 	})
-	writeResponse(w, resp)
+	writeResponse(w, r.URL.Path, resp)
 	return true
 }
 

@@ -1,6 +1,7 @@
 package lb
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"testing"
@@ -86,5 +87,35 @@ func TestShouldDisableForAuthFailure(t *testing.T) {
 				t.Fatalf("shouldDisableForAuthFailure(%d, %q) = %t, want %t", tt.status, tt.path, got, tt.wantDisable)
 			}
 		})
+	}
+}
+
+func TestBackfillModelsDisplayNamesJSON(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{"models":[{"slug":"gpt-5.3","title":"GPT-5.3"},{"slug":"already","title":"Already","display_name":"Keep Me"}]}`)
+	updated, changed, err := backfillModelsDisplayNamesJSON(raw)
+	if err != nil {
+		t.Fatalf("backfillModelsDisplayNamesJSON: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected changed=true")
+	}
+
+	var payload struct {
+		Models []struct {
+			Slug        string `json:"slug"`
+			Title       string `json:"title"`
+			DisplayName string `json:"display_name"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(updated, &payload); err != nil {
+		t.Fatalf("unmarshal updated payload: %v", err)
+	}
+	if payload.Models[0].DisplayName != "GPT-5.3" {
+		t.Fatalf("expected first display_name to be backfilled, got %q", payload.Models[0].DisplayName)
+	}
+	if payload.Models[1].DisplayName != "Keep Me" {
+		t.Fatalf("expected existing display_name to be preserved, got %q", payload.Models[1].DisplayName)
 	}
 }
