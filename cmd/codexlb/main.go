@@ -1221,7 +1221,7 @@ func printStatusTable(status lb.ProxyStatus) {
 			selected = status.SelectedProxyURL
 		}
 	}
-	fmt.Printf("proxy=%s policy=%s selected=%s pinned=%s reason=%s generated_at=%s\n", noneIfEmpty(status.ProxyName), status.Policy.Mode, noneIfEmpty(selected), noneIfEmpty(pinnedAlias), noneIfEmpty(status.SelectionReason), status.GeneratedAt)
+	fmt.Printf("proxy=%s policy=%s selected=%s pinned=%s reason=%s generated=%s\n", noneIfEmpty(status.ProxyName), status.Policy.Mode, noneIfEmpty(selected), noneIfEmpty(pinnedAlias), noneIfEmpty(status.SelectionReason), formatStatusGeneratedAt(status.GeneratedAt))
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "ACTIVE\tPIN\tPROXY\tALIAS\tID\tEMAIL\tSTATUS\tDAILY_LEFT\tDAILY_RESET\tWEEKLY_LEFT\tWEEKLY_RESET\tSCORE\tLAST_SWITCH\tQUOTA")
 	pinnedID := strings.TrimSpace(status.State.PinnedAccountID)
@@ -1332,7 +1332,28 @@ func formatStatusResetAt(ts int64) string {
 	if ts <= 0 {
 		return "-"
 	}
-	return time.Unix(ts, 0).UTC().Format(time.RFC3339)
+	return formatStatusDisplayTime(time.Unix(ts, 0))
+}
+
+func formatStatusGeneratedAt(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return formatStatusDisplayTime(ts)
+	}
+	if ts, err := time.Parse(time.RFC3339, value); err == nil {
+		return formatStatusDisplayTime(ts)
+	}
+	return value
+}
+
+func formatStatusDisplayTime(ts time.Time) string {
+	if ts.IsZero() {
+		return "-"
+	}
+	return ts.Local().Format("2006-01-02 15:04 MST")
 }
 
 func pinnedAliasForStatus(status lb.ProxyStatus) string {

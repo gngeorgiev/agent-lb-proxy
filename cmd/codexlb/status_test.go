@@ -15,7 +15,18 @@ import (
 	"github.com/gngeorgiev/openai-codex-lb/internal/lb"
 )
 
+func setLocalZone(t *testing.T, name string, offsetSeconds int) {
+	t.Helper()
+	prev := time.Local
+	time.Local = time.FixedZone(name, offsetSeconds)
+	t.Cleanup(func() {
+		time.Local = prev
+	})
+}
+
 func TestStatusCommandPrintsTable(t *testing.T) {
+	setLocalZone(t, "EET", 2*60*60)
+
 	status := lb.ProxyStatus{
 		ProxyName:         "main",
 		GeneratedAt:       time.Now().UTC().Format(time.RFC3339),
@@ -57,14 +68,23 @@ func TestStatusCommandPrintsTable(t *testing.T) {
 	if !strings.Contains(out, "alice") {
 		t.Fatalf("expected account row in output: %s", out)
 	}
-	if !strings.Contains(out, "2024-03-09T16:00:00Z") {
+	if !strings.Contains(out, "2024-03-09 18:00 EET") {
 		t.Fatalf("expected daily reset timestamp in output: %s", out)
 	}
-	if !strings.Contains(out, "2024-03-16T14:40:00Z") {
+	if !strings.Contains(out, "2024-03-16 16:40 EET") {
 		t.Fatalf("expected weekly reset timestamp in output: %s", out)
 	}
 	if !strings.Contains(out, "aggregate usage left: daily=80.0% weekly=70.0%") {
 		t.Fatalf("expected aggregate usage line in output: %s", out)
+	}
+}
+
+func TestFormatStatusGeneratedAtUsesLocalTimezone(t *testing.T) {
+	setLocalZone(t, "EEST", 3*60*60)
+
+	got := formatStatusGeneratedAt("2024-03-09T16:00:00Z")
+	if got != "2024-03-09 19:00 EEST" {
+		t.Fatalf("unexpected generated_at format: %q", got)
 	}
 }
 
