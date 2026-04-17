@@ -903,6 +903,73 @@ func TestProxyMaintenanceLoopRefreshesIdleAccountAuth(t *testing.T) {
 	}
 }
 
+func TestProxyMaintenanceLoopRecoversTerminalRefreshFailureAfterAuthFileChanges(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	store, err := OpenStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	oldToken := testJWT(map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-a"}})
+	newToken := testJWT(map[string]any{
+		"https://api.openai.com/auth":    map[string]any{"chatgpt_account_id": "acct-a"},
+		"https://api.openai.com/profile": map[string]any{"email": "a@example.com"},
+	})
+	home := filepath.Join(tmp, "acc-a")
+	writeAuthTokensFile(t, home, oldToken, "refresh-a-dead", "acct-a")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/wham/usage" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token != newToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"unauthorized"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"rate_limit":{"primary_window":{"used_percent":25},"secondary_window":{"used_percent":30}}}`)
+	}))
+	defer upstream.Close()
+
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Settings.Proxy.UpstreamBaseURL = upstream.URL + "/backend-api"
+		sf.Settings.Quota.RefreshIntervalMinutes = 1
+		sf.Settings.Quota.RefreshIntervalMessages = 1
+		sf.Accounts = []Account{
+			{
+				ID:             "a",
+				Alias:          "a",
+				HomeDir:        home,
+				BaseURL:        sf.Settings.Proxy.UpstreamBaseURL,
+				Enabled:        false,
+				DisabledReason: "refresh-token-reused",
+			},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	proxy := NewProxyServer(store, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proxy.StartMaintenanceLoop(ctx, 10*time.Millisecond)
+
+	writeAuthTokensFile(t, home, newToken, "refresh-a-2", "acct-a")
+
+	if !waitFor(t, 2*time.Second, 20*time.Millisecond, func() bool {
+		snap := store.Snapshot()
+		return snap.Accounts[0].Enabled &&
+			snap.Accounts[0].DisabledReason == "" &&
+			snap.Accounts[0].Quota.Source == "openai_usage_api"
+	}) {
+		t.Fatalf("expected maintenance loop to recover terminal refresh failure after auth file update")
+	}
+}
+
 func TestProxyDoesNotDisableAccountOn403ForNonAccountPath(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()

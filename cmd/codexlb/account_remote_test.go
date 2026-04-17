@@ -500,6 +500,41 @@ func TestAccountLoginDefaultsToConfiguredProxyURL(t *testing.T) {
 	}
 }
 
+func TestAccountLoginAllowsEmailAlias(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/admin/account/login":
+			var req lb.AdminLoginRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if req.Alias != "g99517399@gmail.com" {
+				t.Fatalf("unexpected alias: %q", req.Alias)
+			}
+			_ = json.NewEncoder(w).Encode(lb.AdminMutationResponse{OK: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	store, err := lb.OpenStore(root)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	cfg := store.Snapshot().Settings
+	cfg.ProxyURL = server.URL
+	if err := lb.WriteSettingsConfig(root, cfg); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	code := run([]string{"account", "login", "--root", root, "g99517399@gmail.com"})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+}
+
 func TestAccountImportDefaultsToConfiguredProxyURL(t *testing.T) {
 	source := t.TempDir()
 	auth := `{"tokens":{"access_token":"` + testJWT(map[string]any{

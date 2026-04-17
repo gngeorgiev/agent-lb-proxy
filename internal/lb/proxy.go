@@ -1235,7 +1235,11 @@ func (p *ProxyServer) maybeRefreshQuota(ctx context.Context, now time.Time, forc
 			}
 			continue
 		}
-		if isTerminalAuthFailureReason(account.DisabledReason) {
+		// A reused refresh token can be transient when the same account home is
+		// synchronized across machines and another node has already rotated auth.
+		// Keep forced refreshes cheap, but allow background maintenance to retry
+		// later so a newly synced auth.json can recover the account automatically.
+		if force && isTerminalAuthFailureReason(account.DisabledReason) {
 			continue
 		}
 		if isAuthFailureReason(account.DisabledReason) {

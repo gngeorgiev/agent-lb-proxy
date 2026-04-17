@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-var aliasRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var aliasRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$`)
 
 func ValidateAlias(alias string) error {
 	if !aliasRe.MatchString(alias) {
