@@ -253,18 +253,8 @@ func seedRuntimeAuthIfMissing(store *Store, codexHome, proxyURL string) error {
 		candidates := runtimeAuthCandidateIndexes(snapshot, time.Now().UnixMilli())
 
 		for _, idx := range candidates {
-			home := snapshot.Accounts[idx].HomeDir
-			sourceAuth := filepath.Join(home, "auth.json")
-			rawAuth, err := os.ReadFile(sourceAuth)
-			if err != nil {
-				continue
-			}
-			normalizedAuth, err := normalizeRuntimeAuthPayload(rawAuth, snapshot.Accounts[idx].ChatGPTAccountID)
-			if err != nil {
-				continue
-			}
-			if err := os.WriteFile(targetAuth, normalizedAuth, 0o600); err != nil {
-				return fmt.Errorf("seed runtime auth.json from account %s: %w", snapshot.Accounts[idx].Alias, err)
+			if err := writeProxyOnlyRuntimeAuth(targetAuth); err != nil {
+				return fmt.Errorf("write proxy-only runtime auth.json: %w", err)
 			}
 			if err := syncRuntimeConfigForAccount(snapshot, idx, codexHome); err != nil {
 				return err
@@ -274,11 +264,7 @@ func seedRuntimeAuthIfMissing(store *Store, codexHome, proxyURL string) error {
 	}
 
 	if remoteAuth, err := fetchRemoteRuntimeAuth(proxyURL); err == nil {
-		normalizedAuth, err := normalizeRuntimeAuthPayload(remoteAuth.Auth, "")
-		if err != nil {
-			return fmt.Errorf("normalize runtime auth from remote proxy: %w", err)
-		}
-		if err := os.WriteFile(targetAuth, normalizedAuth, 0o600); err != nil {
+		if err := os.WriteFile(targetAuth, remoteAuth.Auth, 0o600); err != nil {
 			return fmt.Errorf("seed runtime auth.json from remote proxy: %w", err)
 		}
 		if err := syncRuntimeConfigFromRemote(remoteAuth, codexHome); err != nil {
@@ -398,8 +384,8 @@ func fetchRemoteRuntimeAuth(proxyURL string) (AdminRuntimeAuthResponse, error) {
 	if len(payload.Auth) == 0 {
 		return AdminRuntimeAuthResponse{}, fmt.Errorf("missing auth payload")
 	}
-	if !json.Valid(payload.Auth) {
-		return AdminRuntimeAuthResponse{}, fmt.Errorf("runtime auth payload is not valid JSON")
+	if _, err := normalizeRuntimeAuthPayload(payload.Auth, ""); err != nil {
+		return AdminRuntimeAuthResponse{}, fmt.Errorf("runtime auth payload is invalid: %w", err)
 	}
 	return payload, nil
 }
@@ -429,6 +415,14 @@ func runtimeAuthCandidateIndexes(snapshot StoreFile, nowMS int64) []int {
 }
 
 func writeProxyOnlyRuntimeAuth(path string) error {
+	payload, err := proxyOnlyRuntimeAuthPayload()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, payload, 0o600)
+}
+
+func proxyOnlyRuntimeAuthPayload() ([]byte, error) {
 	token := buildProxyOnlyAccessToken()
 	payload := map[string]any{
 		"tokens": map[string]any{
@@ -440,9 +434,9 @@ func writeProxyOnlyRuntimeAuth(path string) error {
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return b, nil
 }
 
 func buildProxyOnlyAccessToken() string {

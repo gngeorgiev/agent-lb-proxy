@@ -217,14 +217,10 @@ func (p *ProxyServer) handleAdmin(w http.ResponseWriter, r *http.Request) int {
 			return http.StatusInternalServerError
 		}
 		account := snapshot.Accounts[sel.Index]
-		rawAuth, err := os.ReadFile(filepath.Join(account.HomeDir, "auth.json"))
+		proxyOnlyAuth, err := proxyOnlyRuntimeAuthPayload()
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("read auth for %s: %v", account.Alias, err))
-			return http.StatusBadRequest
-		}
-		if !json.Valid(rawAuth) {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid auth.json for %s", account.Alias))
-			return http.StatusBadRequest
+			writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("build proxy-only runtime auth: %v", err))
+			return http.StatusInternalServerError
 		}
 		var rawConfig []byte
 		configPath := filepath.Join(account.HomeDir, "config.toml")
@@ -232,7 +228,7 @@ func (p *ProxyServer) handleAdmin(w http.ResponseWriter, r *http.Request) int {
 			rawConfig = data
 		}
 		writeJSON(w, http.StatusOK, AdminRuntimeAuthResponse{
-			Auth:        json.RawMessage(rawAuth),
+			Auth:        json.RawMessage(proxyOnlyAuth),
 			Config:      string(rawConfig),
 			SourceAlias: account.Alias,
 		})

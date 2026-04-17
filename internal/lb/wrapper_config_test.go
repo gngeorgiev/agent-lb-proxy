@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -166,8 +167,8 @@ func TestSeedRuntimeAuthIfMissingRefreshesExistingRuntimeAuthFromSelectedAccount
 	if err != nil {
 		t.Fatalf("LoadAuth(runtime): %v", err)
 	}
-	if auth.ChatGPTAccountID != "acct-b" {
-		t.Fatalf("expected refreshed runtime account acct-b, got %q", auth.ChatGPTAccountID)
+	if auth.ChatGPTAccountID != "proxy-only" {
+		t.Fatalf("expected refreshed runtime account proxy-only, got %q", auth.ChatGPTAccountID)
 	}
 }
 
@@ -185,8 +186,12 @@ func TestSeedRuntimeAuthIfMissingFetchesFromRemoteProxy(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
+		auth, err := proxyOnlyRuntimeAuthPayload()
+		if err != nil {
+			t.Fatalf("proxyOnlyRuntimeAuthPayload: %v", err)
+		}
 		_ = json.NewEncoder(w).Encode(AdminRuntimeAuthResponse{
-			Auth: json.RawMessage(`{"tokens":{"access_token":"remote-access","id_token":"remote-id","account_id":"acct-remote"}}`),
+			Auth: json.RawMessage(auth),
 		})
 	}))
 	defer server.Close()
@@ -207,17 +212,18 @@ func TestSeedRuntimeAuthIfMissingFetchesFromRemoteProxy(t *testing.T) {
 		t.Fatalf("unmarshal runtime auth payload: %v", err)
 	}
 	tokens, _ := payload["tokens"].(map[string]any)
-	if got, _ := tokens["access_token"].(string); got != "remote-access" {
-		t.Fatalf("unexpected access_token: %q", got)
+	accessToken, _ := tokens["access_token"].(string)
+	if strings.TrimSpace(accessToken) == "" {
+		t.Fatalf("expected proxy-only access_token")
 	}
-	if got, _ := tokens["id_token"].(string); got != "remote-id" {
-		t.Fatalf("unexpected id_token: %q", got)
+	if got, _ := tokens["id_token"].(string); got != accessToken {
+		t.Fatalf("expected proxy-only id_token to match access_token, got %q want %q", got, accessToken)
 	}
-	if got, _ := tokens["account_id"].(string); got != "acct-remote" {
+	if got, _ := tokens["account_id"].(string); got != "proxy-only" {
 		t.Fatalf("unexpected account_id: %q", got)
 	}
-	if got, _ := tokens["refresh_token"].(string); got != "remote-access" {
-		t.Fatalf("expected refresh_token to be derived from access_token, got %q", got)
+	if got, _ := tokens["refresh_token"].(string); got != accessToken {
+		t.Fatalf("expected refresh_token to match access_token, got %q want %q", got, accessToken)
 	}
 }
 
@@ -236,8 +242,12 @@ func TestSeedRuntimeAuthIfMissingCopiesRemoteRuntimeConfig(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
+		auth, err := proxyOnlyRuntimeAuthPayload()
+		if err != nil {
+			t.Fatalf("proxyOnlyRuntimeAuthPayload: %v", err)
+		}
 		_ = json.NewEncoder(w).Encode(AdminRuntimeAuthResponse{
-			Auth:        json.RawMessage(`{"tokens":{"access_token":"remote-access","id_token":"remote-id","account_id":"acct-remote"}}`),
+			Auth:        json.RawMessage(auth),
 			Config:      wantConfig,
 			SourceAlias: "remote-a",
 		})
@@ -425,8 +435,8 @@ func TestSeedRuntimeAuthIfMissingDoesNotBorrowDifferentAccountConfig(t *testing.
 	if err != nil {
 		t.Fatalf("LoadAuth(runtime): %v", err)
 	}
-	if auth.ChatGPTAccountID != "acct-b" {
-		t.Fatalf("expected runtime account acct-b, got %q", auth.ChatGPTAccountID)
+	if auth.ChatGPTAccountID != "proxy-only" {
+		t.Fatalf("expected runtime account proxy-only, got %q", auth.ChatGPTAccountID)
 	}
 
 	gotConfig, err := os.ReadFile(filepath.Join(runtimeHome, "config.toml"))

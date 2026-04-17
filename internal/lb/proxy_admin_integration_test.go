@@ -52,6 +52,17 @@ func TestProxyAdminImportListPinUnpinRemove(t *testing.T) {
 	if !json.Valid(runtimeAuthResp.Auth) {
 		t.Fatalf("expected valid runtime auth payload, got: %s", string(runtimeAuthResp.Auth))
 	}
+	var runtimeAuthPayload struct {
+		Tokens struct {
+			AccountID string `json:"account_id"`
+		} `json:"tokens"`
+	}
+	if err := json.Unmarshal(runtimeAuthResp.Auth, &runtimeAuthPayload); err != nil {
+		t.Fatalf("unmarshal runtime auth payload: %v", err)
+	}
+	if runtimeAuthPayload.Tokens.AccountID != "proxy-only" {
+		t.Fatalf("expected proxy-only runtime auth account id, got %q", runtimeAuthPayload.Tokens.AccountID)
+	}
 	if runtimeAuthResp.SourceAlias != "alice" {
 		t.Fatalf("expected source alias alice, got %q", runtimeAuthResp.SourceAlias)
 	}
