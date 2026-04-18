@@ -1213,18 +1213,32 @@ func printStatusShort(status lb.ProxyStatus) {
 }
 
 func printStatusTable(status lb.ProxyStatus) {
-	pinnedAlias := pinnedAliasForStatus(status)
-	selected := status.SelectedAccountID
-	if selected == "" {
-		selected = status.SelectedProxyName
-		if selected == "" {
-			selected = status.SelectedProxyURL
+	if statusTerminalWidth() > 0 && statusTerminalWidth() < 140 {
+		printStatusTableCompact(status)
+		return
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	pinnedID := strings.TrimSpace(status.State.PinnedAccountID)
+	showPin := false
+	showStatus := false
+	for _, a := range status.Accounts {
+		if a.Pinned || (pinnedID != "" && (a.ID == pinnedID || a.Alias == pinnedID)) {
+			showPin = true
+		}
+		if accountStatusLabel(a) != "ready" {
+			showStatus = true
 		}
 	}
-	fmt.Printf("proxy=%s policy=%s selected=%s pinned=%s reason=%s generated=%s\n", noneIfEmpty(status.ProxyName), status.Policy.Mode, noneIfEmpty(selected), noneIfEmpty(pinnedAlias), noneIfEmpty(status.SelectionReason), formatStatusGeneratedAt(status.GeneratedAt))
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ACTIVE\tPIN\tPROXY\tALIAS\tID\tEMAIL\tSTATUS\tDAILY_LEFT\tDAILY_RESET\tWEEKLY_LEFT\tWEEKLY_RESET\tSCORE\tLAST_SWITCH\tQUOTA")
-	pinnedID := strings.TrimSpace(status.State.PinnedAccountID)
+	headers := []string{"ACTIVE"}
+	if showPin {
+		headers = append(headers, "PIN")
+	}
+	headers = append(headers, "PROXY", "ALIAS", "EMAIL")
+	if showStatus {
+		headers = append(headers, "STATUS")
+	}
+	headers = append(headers, "DAILY LEFT", "DAILY RESET", "WEEKLY LEFT", "WEEKLY RESET", "SCORE")
+	_, _ = fmt.Fprintln(w, strings.Join(headers, "\t"))
 	dailyTotal := 0.0
 	dailyCount := 0
 	weeklyTotal := 0.0
@@ -1238,17 +1252,7 @@ func printStatusTable(status lb.ProxyStatus) {
 		if a.Pinned || (pinnedID != "" && (a.ID == pinnedID || a.Alias == pinnedID)) {
 			pin = "P"
 		}
-		state := "ready"
-		if !a.Enabled || a.DisabledReason != "" {
-			state = "disabled"
-			if a.DisabledReason != "" {
-				state += "(" + a.DisabledReason + ")"
-			}
-		} else if a.CooldownSeconds > 0 {
-			state = fmt.Sprintf("cooldown(%ds)", a.CooldownSeconds)
-		} else if !a.Healthy {
-			state = "unhealthy"
-		}
+		state := accountStatusLabel(a)
 
 		daily := "-"
 		if a.DailyLeftPct >= 0 {
@@ -1264,16 +1268,16 @@ func printStatusTable(status lb.ProxyStatus) {
 		if a.Email != "" {
 			email = a.Email
 		}
-		lastSwitch := "-"
-		if a.LastSwitchReason != "" && !hideStaleLastSwitchReason(a) {
-			lastSwitch = a.LastSwitchReason
+		row := []any{active}
+		if showPin {
+			row = append(row, pin)
 		}
-		quota := "-"
-		if a.QuotaSource != "" {
-			quota = a.QuotaSource
+		row = append(row, noneIfEmpty(a.ProxyName), a.Alias, email)
+		if showStatus {
+			row = append(row, state)
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.3f\t%s\t%s\n",
-			active, pin, noneIfEmpty(a.ProxyName), a.Alias, a.ID, email, state, daily, dailyReset, weekly, weeklyReset, a.Score, lastSwitch, quota)
+		row = append(row, daily, dailyReset, weekly, weeklyReset, fmt.Sprintf("%.3f", a.Score))
+		printTabRow(w, row...)
 		if a.DailyLeftPct >= 0 {
 			dailyTotal += a.DailyLeftPct
 			dailyCount++
@@ -1283,8 +1287,27 @@ func printStatusTable(status lb.ProxyStatus) {
 			weeklyCount++
 		}
 	}
+	sepRow := []any{"-"}
+	if showPin {
+		sepRow = append(sepRow, "-")
+	}
+	sepRow = append(sepRow, "-", "-", "-")
+	if showStatus {
+		sepRow = append(sepRow, "-")
+	}
+	sepRow = append(sepRow, "-", "-", "-", "-", "-")
+	printTabRow(w, sepRow...)
+	avgRow := []any{""}
+	if showPin {
+		avgRow = append(avgRow, "")
+	}
+	avgRow = append(avgRow, "", "", "")
+	if showStatus {
+		avgRow = append(avgRow, "")
+	}
+	avgRow = append(avgRow, formatAggregatePercent(dailyTotal, dailyCount), "", formatAggregatePercent(weeklyTotal, weeklyCount), "", "")
+	printTabRow(w, avgRow...)
 	_ = w.Flush()
-	fmt.Printf("aggregate usage left: daily=%s weekly=%s\n", formatAggregatePercent(dailyTotal, dailyCount), formatAggregatePercent(weeklyTotal, weeklyCount))
 
 	if len(status.ChildProxies) == 0 {
 		return
@@ -1292,7 +1315,7 @@ func printStatusTable(status lb.ProxyStatus) {
 
 	fmt.Println()
 	childWriter := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(childWriter, "NAME\tURL\tSTATUS\tSCORE\tSELECTED\tREASON\tLAST_SWITCH\tERROR")
+	_, _ = fmt.Fprintln(childWriter, "NAME\tURL\tSTATUS\tSCORE\tSELECTED\tREASON\tERROR")
 	for _, child := range status.ChildProxies {
 		state := "ready"
 		if !child.Reachable {
@@ -1302,18 +1325,121 @@ func printStatusTable(status lb.ProxyStatus) {
 		} else if !child.Healthy {
 			state = "unhealthy"
 		}
-		_, _ = fmt.Fprintf(childWriter, "%s\t%s\t%s\t%.3f\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(childWriter, "%s\t%s\t%s\t%.3f\t%s\t%s\t%s\n",
 			noneIfEmpty(child.Name),
 			child.URL,
 			state,
 			child.Score,
 			noneIfEmpty(child.SelectedTarget),
 			noneIfEmpty(child.SelectionReason),
-			noneIfEmpty(child.LastSwitchReason),
 			noneIfEmpty(child.LastError),
 		)
 	}
 	_ = childWriter.Flush()
+}
+
+func printStatusTableCompact(status lb.ProxyStatus) {
+	pinnedID := strings.TrimSpace(status.State.PinnedAccountID)
+	dailyTotal := 0.0
+	dailyCount := 0
+	weeklyTotal := 0.0
+	weeklyCount := 0
+	for i, a := range status.Accounts {
+		if i > 0 {
+			fmt.Println()
+		}
+		active := " "
+		if a.Active {
+			active = "*"
+		}
+		pin := ""
+		if a.Pinned || (pinnedID != "" && (a.ID == pinnedID || a.Alias == pinnedID)) {
+			pin = " pinned"
+		}
+		fmt.Printf("%s %s @ %s%s\n", active, a.Alias, noneIfEmpty(a.ProxyName), pin)
+		if a.Email != "" {
+			fmt.Printf("  %s\n", a.Email)
+		}
+		fmt.Printf("  daily %s (%s)  weekly %s (%s)  score %.3f\n",
+			formatStatusPercent(a.DailyLeftPct),
+			formatStatusResetAt(a.DailyResetAt),
+			formatStatusPercent(a.WeeklyLeftPct),
+			formatStatusResetAt(a.WeeklyResetAt),
+			a.Score,
+		)
+		meta := []string{}
+		if state := accountStatusLabel(a); state != "ready" {
+			meta = append(meta, "status "+state)
+		}
+		if len(meta) > 0 {
+			fmt.Printf("  %s\n", strings.Join(meta, "  "))
+		}
+		if a.DailyLeftPct >= 0 {
+			dailyTotal += a.DailyLeftPct
+			dailyCount++
+		}
+		if a.WeeklyLeftPct >= 0 {
+			weeklyTotal += a.WeeklyLeftPct
+			weeklyCount++
+		}
+	}
+	fmt.Println()
+	fmt.Println("----")
+	fmt.Printf("daily %s  weekly %s\n", formatAggregatePercent(dailyTotal, dailyCount), formatAggregatePercent(weeklyTotal, weeklyCount))
+
+	if len(status.ChildProxies) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("child proxies:")
+	for _, child := range status.ChildProxies {
+		state := "ready"
+		if !child.Reachable {
+			state = "unreachable"
+		} else if child.CooldownSeconds > 0 {
+			state = fmt.Sprintf("cooldown(%ds)", child.CooldownSeconds)
+		} else if !child.Healthy {
+			state = "unhealthy"
+		}
+		fmt.Printf("- %s  %s  score %.3f\n", noneIfEmpty(child.Name), state, child.Score)
+		fmt.Printf("  %s\n", child.URL)
+		meta := []string{}
+		if child.SelectedTarget != "" {
+			meta = append(meta, "selected "+child.SelectedTarget)
+		}
+		if child.SelectionReason != "" {
+			meta = append(meta, "reason "+child.SelectionReason)
+		}
+		if child.LastError != "" {
+			meta = append(meta, "error "+child.LastError)
+		}
+		if len(meta) > 0 {
+			fmt.Printf("  %s\n", strings.Join(meta, "  "))
+		}
+	}
+}
+
+func printTabRow(w io.Writer, values ...any) {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, fmt.Sprint(value))
+	}
+	_, _ = fmt.Fprintln(w, strings.Join(parts, "\t"))
+}
+
+func accountStatusLabel(a lb.AccountStatus) string {
+	state := "ready"
+	if !a.Enabled || a.DisabledReason != "" {
+		state = "disabled"
+		if a.DisabledReason != "" {
+			state += "(" + a.DisabledReason + ")"
+		}
+	} else if a.CooldownSeconds > 0 {
+		state = fmt.Sprintf("cooldown(%ds)", a.CooldownSeconds)
+	} else if !a.Healthy {
+		state = "unhealthy"
+	}
+	return state
 }
 
 func hideStaleLastSwitchReason(a lb.AccountStatus) bool {
@@ -1332,7 +1458,14 @@ func formatStatusResetAt(ts int64) string {
 	if ts <= 0 {
 		return "-"
 	}
-	return formatStatusDisplayTime(time.Unix(ts, 0))
+	return formatStatusRelativeTime(time.Unix(ts, 0))
+}
+
+func formatStatusPercent(value float64) string {
+	if value < 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f%%", value)
 }
 
 func formatStatusGeneratedAt(value string) string {
@@ -1349,11 +1482,52 @@ func formatStatusGeneratedAt(value string) string {
 	return value
 }
 
+func statusTerminalWidth() int {
+	if value := strings.TrimSpace(os.Getenv("COLUMNS")); value != "" {
+		if width, err := strconv.Atoi(value); err == nil && width > 0 {
+			return width
+		}
+	}
+	return 0
+}
+
 func formatStatusDisplayTime(ts time.Time) string {
 	if ts.IsZero() {
 		return "-"
 	}
 	return ts.Local().Format("2006-01-02 15:04 MST")
+}
+
+func formatStatusRelativeTime(ts time.Time) string {
+	if ts.IsZero() {
+		return "-"
+	}
+	d := time.Until(ts)
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return "soon"
+	}
+	if d < time.Hour {
+		minutes := int(d.Round(time.Minute) / time.Minute)
+		if minutes <= 1 {
+			return "in 1 min"
+		}
+		return fmt.Sprintf("in %d min", minutes)
+	}
+	if d < 48*time.Hour {
+		hours := int(d.Round(time.Hour) / time.Hour)
+		if hours <= 1 {
+			return "in 1 hour"
+		}
+		return fmt.Sprintf("in %d hours", hours)
+	}
+	days := int(d.Round(24*time.Hour) / (24 * time.Hour))
+	if days <= 1 {
+		return "in 1 day"
+	}
+	return fmt.Sprintf("in %d days", days)
 }
 
 func pinnedAliasForStatus(status lb.ProxyStatus) string {

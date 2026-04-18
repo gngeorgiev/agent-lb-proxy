@@ -26,6 +26,7 @@ func setLocalZone(t *testing.T, name string, offsetSeconds int) {
 
 func TestStatusCommandPrintsTable(t *testing.T) {
 	setLocalZone(t, "EET", 2*60*60)
+	now := time.Now()
 
 	status := lb.ProxyStatus{
 		ProxyName:         "main",
@@ -35,7 +36,7 @@ func TestStatusCommandPrintsTable(t *testing.T) {
 		State:             lb.RuntimeState{PinnedAccountID: "openai:alice"},
 		SelectionReason:   "usage-stay",
 		Accounts: []lb.AccountStatus{
-			{ProxyName: "main", Alias: "alice", ID: "openai:alice", Email: "a@example.com", Active: true, Healthy: true, Enabled: true, DailyLeftPct: 80, DailyResetAt: 1710000000, WeeklyLeftPct: 70, WeeklyResetAt: 1710600000, Score: 0.75},
+			{ProxyName: "main", Alias: "alice", ID: "openai:alice", Email: "a@example.com", Active: true, Healthy: true, Enabled: true, DailyLeftPct: 80, DailyResetAt: now.Add(6 * time.Hour).Unix(), WeeklyLeftPct: 70, WeeklyResetAt: now.Add(4 * 24 * time.Hour).Unix(), Score: 0.75},
 		},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,28 +54,31 @@ func TestStatusCommandPrintsTable(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d output=%s", code, out)
 	}
-	if !strings.Contains(out, "policy=usage_balanced") {
-		t.Fatalf("expected policy line in output: %s", out)
+	if strings.Contains(out, "policy=usage_balanced") || strings.Contains(out, "proxy=main") || strings.Contains(out, "pinned=alice") {
+		t.Fatalf("did not expect status header line in output: %s", out)
 	}
-	if !strings.Contains(out, "proxy=main") {
-		t.Fatalf("expected proxy name in output: %s", out)
-	}
-	if !strings.Contains(out, "pinned=alice") {
-		t.Fatalf("expected pinned alias in output: %s", out)
-	}
-	if !regexp.MustCompile(`(?m)^\*\s+P\s+main\s+alice\s+openai:alice`).MatchString(out) {
+	if !regexp.MustCompile(`(?m)^\*\s+P\s+main\s+alice\s+a@example\.com`).MatchString(out) {
 		t.Fatalf("expected pinned marker in account row: %s", out)
+	}
+	if !strings.Contains(out, "PIN") {
+		t.Fatalf("expected pin column when an account is pinned: %s", out)
+	}
+	if strings.Contains(out, "STATUS") {
+		t.Fatalf("did not expect status column when all accounts are ready: %s", out)
+	}
+	if strings.Contains(out, "\tID\t") || strings.Contains(out, " ID ") {
+		t.Fatalf("did not expect ID column in output: %s", out)
 	}
 	if !strings.Contains(out, "alice") {
 		t.Fatalf("expected account row in output: %s", out)
 	}
-	if !strings.Contains(out, "2024-03-09 18:00 EET") {
-		t.Fatalf("expected daily reset timestamp in output: %s", out)
+	if !strings.Contains(out, "in 6 hours") && !strings.Contains(out, "in 5 hours") && !strings.Contains(out, "in 7 hours") {
+		t.Fatalf("expected relative reset timestamp in output: %s", out)
 	}
-	if !strings.Contains(out, "2024-03-16 16:40 EET") {
-		t.Fatalf("expected weekly reset timestamp in output: %s", out)
+	if !strings.Contains(out, "in 4 days") {
+		t.Fatalf("expected relative weekly reset timestamp in output: %s", out)
 	}
-	if !strings.Contains(out, "aggregate usage left: daily=80.0% weekly=70.0%") {
+	if !regexp.MustCompile(`(?m)^(\s+)?80\.0%\s+\s+70\.0%`).MatchString(out) {
 		t.Fatalf("expected aggregate usage line in output: %s", out)
 	}
 }
@@ -110,7 +114,7 @@ func TestStatusCommandAggregateUsageLeftAveragesAccounts(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d output=%s", code, out)
 	}
-	if !strings.Contains(out, "aggregate usage left: daily=70.0% weekly=50.0%") {
+	if !regexp.MustCompile(`(?m)^(\s+)?70\.0%\s+\s+50\.0%`).MatchString(out) {
 		t.Fatalf("unexpected aggregate usage line: %s", out)
 	}
 }
@@ -148,11 +152,134 @@ func TestStatusCommandHidesExpiredTransientLastSwitchReason(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d output=%s", code, out)
 	}
-	if !strings.Contains(out, "ready") {
-		t.Fatalf("expected ready state in output: %s", out)
+	if strings.Contains(out, "STATUS") {
+		t.Fatalf("did not expect status column in output: %s", out)
 	}
 	if strings.Contains(out, "websocket-proxy-error") {
 		t.Fatalf("expected expired websocket-proxy-error to be hidden: %s", out)
+	}
+}
+
+func TestStatusCommandHidesPinAndStatusColumnsWhenUnused(t *testing.T) {
+	status := lb.ProxyStatus{
+		ProxyName:   "main",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Policy:      lb.PolicyConfig{Mode: lb.PolicyUsageBalanced},
+		Accounts: []lb.AccountStatus{
+			{ProxyName: "main", Alias: "a", ID: "openai:a", Email: "a@example.com", Enabled: true, Healthy: true, DailyLeftPct: 90, WeeklyLeftPct: 80, Score: 0.9},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(status)
+	}))
+	defer server.Close()
+
+	out, code := captureStdout(func() int {
+		return run([]string{"status", "--root", t.TempDir(), "--proxy-url", server.URL})
+	})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d output=%s", code, out)
+	}
+	header := strings.Split(strings.TrimSpace(out), "\n")[0]
+	if strings.Contains(header, "PIN") {
+		t.Fatalf("did not expect PIN column in header: %s", out)
+	}
+	if strings.Contains(header, "STATUS") {
+		t.Fatalf("did not expect STATUS column in header: %s", out)
+	}
+	if strings.Contains(header, "ID") {
+		t.Fatalf("did not expect ID column in header: %s", out)
+	}
+}
+
+func TestStatusCommandShowsStatusColumnWhenAccountNotReady(t *testing.T) {
+	status := lb.ProxyStatus{
+		ProxyName:   "main",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Policy:      lb.PolicyConfig{Mode: lb.PolicyUsageBalanced},
+		Accounts: []lb.AccountStatus{
+			{ProxyName: "main", Alias: "a", ID: "openai:a", Email: "a@example.com", Enabled: false, DisabledReason: "refresh-token-reused", DailyLeftPct: 90, WeeklyLeftPct: 80, Score: 0.9},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(status)
+	}))
+	defer server.Close()
+
+	out, code := captureStdout(func() int {
+		return run([]string{"status", "--root", t.TempDir(), "--proxy-url", server.URL})
+	})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d output=%s", code, out)
+	}
+	if !strings.Contains(out, "STATUS") {
+		t.Fatalf("expected STATUS column in output: %s", out)
+	}
+	if !strings.Contains(out, "disabled(refresh-token-reused)") {
+		t.Fatalf("expected disabled status in output: %s", out)
+	}
+	if strings.Contains(out, "QUOTA") || strings.Contains(out, "LAST_SWITCH") {
+		t.Fatalf("did not expect quota/last switch columns in output: %s", out)
+	}
+}
+
+func TestStatusCommandUsesCompactLayoutOnNarrowTerminals(t *testing.T) {
+	t.Setenv("COLUMNS", "100")
+	now := time.Now()
+	status := lb.ProxyStatus{
+		ProxyName:   "main",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Policy:      lb.PolicyConfig{Mode: lb.PolicyUsageBalanced},
+		Accounts: []lb.AccountStatus{
+			{
+				ProxyName:        "main",
+				Alias:            "alice",
+				ID:               "openai:alice",
+				Email:            "a@example.com",
+				Active:           true,
+				Enabled:          true,
+				Healthy:          true,
+				DailyLeftPct:     80,
+				DailyResetAt:     now.Add(6 * time.Hour).Unix(),
+				WeeklyLeftPct:    70,
+				WeeklyResetAt:    now.Add(4 * 24 * time.Hour).Unix(),
+				Score:            0.75,
+				LastSwitchReason: "usage-stay",
+				QuotaSource:      "openai_usage_api",
+			},
+		},
+		ChildProxies: []lb.ChildProxyStatus{
+			{Name: "edge-vpn", URL: "http://mullvad-vpn:8766", Reachable: true, Healthy: true, Score: 0.6, SelectedTarget: "openai:alice", SelectionReason: "usage-stay"},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(status)
+	}))
+	defer server.Close()
+
+	out, code := captureStdout(func() int {
+		return run([]string{"status", "--root", t.TempDir(), "--proxy-url", server.URL})
+	})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d output=%s", code, out)
+	}
+	if strings.Contains(out, "ACTIVE  PROXY  ALIAS") {
+		t.Fatalf("did not expect wide table header in compact output: %s", out)
+	}
+	if !strings.Contains(out, "* alice @ main") {
+		t.Fatalf("expected compact account header: %s", out)
+	}
+	if !strings.Contains(out, "daily 80.0%") || !strings.Contains(out, "weekly 70.0%") {
+		t.Fatalf("expected compact usage line: %s", out)
+	}
+	if !strings.Contains(out, "----") || !strings.Contains(out, "daily 80.0%  weekly 70.0%") {
+		t.Fatalf("expected compact aggregate block: %s", out)
+	}
+	if strings.Contains(out, "quota ") || strings.Contains(out, "note ") {
+		t.Fatalf("did not expect quota/last-switch metadata in compact output: %s", out)
+	}
+	if !strings.Contains(out, "child proxies:") || !strings.Contains(out, "- edge-vpn  ready  score 0.600") {
+		t.Fatalf("expected compact child proxy section: %s", out)
 	}
 }
 
@@ -263,9 +390,6 @@ func TestStatusCommandPrintsChildProxyTable(t *testing.T) {
 	})
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d output=%s", code, out)
-	}
-	if !strings.Contains(out, "selected=child-b") {
-		t.Fatalf("expected selected child proxy in output: %s", out)
 	}
 	if !strings.Contains(out, "child-b") {
 		t.Fatalf("expected child proxy name in output: %s", out)
