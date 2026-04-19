@@ -204,7 +204,11 @@ func (p *ProxyServer) handleAggregatedUsageForProxyOnly(w http.ResponseWriter, r
 		return false
 	}
 
-	status := p.buildStatus(context.WithoutCancel(r.Context()), p.store.Snapshot(), now, false)
+	snapshot := p.store.Snapshot()
+	if hasChildProxyRouting(snapshot) {
+		go p.refreshChildProxyStatusCache(snapshot, now)
+	}
+	status := p.buildStatus(context.WithoutCancel(r.Context()), snapshot, now, false)
 	payload := aggregateUsageResponse(status, now)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
