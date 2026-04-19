@@ -17,16 +17,44 @@ type usageWindow struct {
 	Limit             float64 `json:"limit"`
 	Used              float64 `json:"used"`
 	UsedPercent       float64 `json:"used_percent"`
+	LimitWindowSeconds int64  `json:"limit_window_seconds,omitempty"`
 	ResetAfterSeconds int64   `json:"reset_after_seconds"`
 	ResetAt           int64   `json:"reset_at"`
 	ResetsAt          int64   `json:"resets_at"`
 }
 
+type usageRateLimit struct {
+	Allowed         bool        `json:"allowed"`
+	LimitReached    bool        `json:"limit_reached"`
+	PrimaryWindow   usageWindow `json:"primary_window"`
+	SecondaryWindow usageWindow `json:"secondary_window"`
+}
+
+type usageCredits struct {
+	HasCredits           bool    `json:"has_credits"`
+	Unlimited            bool    `json:"unlimited"`
+	OverageLimitReached  bool    `json:"overage_limit_reached"`
+	Balance              string  `json:"balance"`
+	ApproxLocalMessages  [2]int  `json:"approx_local_messages"`
+	ApproxCloudMessages  [2]int  `json:"approx_cloud_messages"`
+}
+
+type usageSpendControl struct {
+	Reached bool `json:"reached"`
+}
+
 type usageResponse struct {
-	RateLimit struct {
-		PrimaryWindow   usageWindow `json:"primary_window"`
-		SecondaryWindow usageWindow `json:"secondary_window"`
-	} `json:"rate_limit"`
+	UserID               string              `json:"user_id,omitempty"`
+	AccountID            string              `json:"account_id,omitempty"`
+	Email                string              `json:"email,omitempty"`
+	PlanType             string              `json:"plan_type,omitempty"`
+	RateLimit            usageRateLimit      `json:"rate_limit"`
+	CodeReviewRateLimit  any                 `json:"code_review_rate_limit"`
+	AdditionalRateLimits []any               `json:"additional_rate_limits"`
+	Credits              usageCredits        `json:"credits"`
+	SpendControl         usageSpendControl   `json:"spend_control"`
+	RateLimitReachedType any                 `json:"rate_limit_reached_type"`
+	Promo                any                 `json:"promo"`
 }
 
 type upstreamStatusError struct {
@@ -155,9 +183,16 @@ func aggregateUsageResponse(status ProxyStatus, now time.Time) usageResponse {
 	})
 
 	var payload usageResponse
+	payload.UserID = "proxy-only"
+	payload.AccountID = "proxy-only"
+	payload.Email = "proxy-only@codexlb.internal"
+	payload.PlanType = "plus"
+	payload.RateLimit.Allowed = dailyUsedPercent < 100 && weeklyUsedPercent < 100
+	payload.RateLimit.LimitReached = !payload.RateLimit.Allowed
 	payload.RateLimit.PrimaryWindow.Limit = 100
 	payload.RateLimit.PrimaryWindow.Used = dailyUsedPercent
 	payload.RateLimit.PrimaryWindow.UsedPercent = dailyUsedPercent
+	payload.RateLimit.PrimaryWindow.LimitWindowSeconds = 5 * 60 * 60
 	payload.RateLimit.PrimaryWindow.ResetAt = dailyResetAt
 	payload.RateLimit.PrimaryWindow.ResetsAt = dailyResetAt
 	if dailyResetAt > 0 {
@@ -167,6 +202,7 @@ func aggregateUsageResponse(status ProxyStatus, now time.Time) usageResponse {
 	payload.RateLimit.SecondaryWindow.Limit = 100
 	payload.RateLimit.SecondaryWindow.Used = weeklyUsedPercent
 	payload.RateLimit.SecondaryWindow.UsedPercent = weeklyUsedPercent
+	payload.RateLimit.SecondaryWindow.LimitWindowSeconds = 7 * 24 * 60 * 60
 	payload.RateLimit.SecondaryWindow.ResetAt = weeklyResetAt
 	payload.RateLimit.SecondaryWindow.ResetsAt = weeklyResetAt
 	if weeklyResetAt > 0 {

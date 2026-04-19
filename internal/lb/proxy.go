@@ -249,7 +249,9 @@ func (p *ProxyServer) handleAdmin(w http.ResponseWriter, r *http.Request) int {
 			return http.StatusInternalServerError
 		}
 		account := snapshot.Accounts[sel.Index]
-		proxyOnlyAuth, err := proxyOnlyRuntimeAuthPayload()
+		proxyOnlyAuth, err := proxyOnlyRuntimeAuthPayload(proxyOnlyRuntimeProfile{
+			PlanType: planTypeForAccount(account),
+		})
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("build proxy-only runtime auth: %v", err))
 			return http.StatusInternalServerError

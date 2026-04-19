@@ -186,7 +186,7 @@ func TestSeedRuntimeAuthIfMissingFetchesFromRemoteProxy(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		auth, err := proxyOnlyRuntimeAuthPayload()
+		auth, err := proxyOnlyRuntimeAuthPayload(proxyOnlyRuntimeProfile{})
 		if err != nil {
 			t.Fatalf("proxyOnlyRuntimeAuthPayload: %v", err)
 		}
@@ -242,7 +242,7 @@ func TestSeedRuntimeAuthIfMissingCopiesRemoteRuntimeConfig(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		auth, err := proxyOnlyRuntimeAuthPayload()
+		auth, err := proxyOnlyRuntimeAuthPayload(proxyOnlyRuntimeProfile{})
 		if err != nil {
 			t.Fatalf("proxyOnlyRuntimeAuthPayload: %v", err)
 		}

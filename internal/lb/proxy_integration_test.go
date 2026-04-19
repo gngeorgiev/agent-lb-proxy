@@ -187,7 +187,7 @@ func TestProxyReturnsAggregatedUsageForProxyOnlyRuntimeAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+buildProxyOnlyAccessToken())
+	req.Header.Set("Authorization", "Bearer "+buildProxyOnlyAccessToken(proxyOnlyRuntimeProfile{}))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET usage: %v", err)
@@ -207,6 +207,21 @@ func TestProxyReturnsAggregatedUsageForProxyOnlyRuntimeAuth(t *testing.T) {
 	}
 	if got := payload.RateLimit.PrimaryWindow.UsedPercent; got != 40 {
 		t.Fatalf("expected aggregated primary used_percent 40, got %v", got)
+	}
+	if payload.PlanType != "plus" {
+		t.Fatalf("expected plan_type plus, got %q", payload.PlanType)
+	}
+	if payload.Email != "proxy-only@codexlb.internal" {
+		t.Fatalf("expected proxy-only email, got %q", payload.Email)
+	}
+	if !payload.RateLimit.Allowed || payload.RateLimit.LimitReached {
+		t.Fatalf("expected rate limit to remain allowed, got %+v", payload.RateLimit)
+	}
+	if got := payload.RateLimit.PrimaryWindow.LimitWindowSeconds; got != 5*60*60 {
+		t.Fatalf("expected primary limit window to be 5h, got %d", got)
+	}
+	if got := payload.RateLimit.SecondaryWindow.LimitWindowSeconds; got != 7*24*60*60 {
+		t.Fatalf("expected secondary limit window to be 7d, got %d", got)
 	}
 	if got := payload.RateLimit.SecondaryWindow.UsedPercent; got != 30 {
 		t.Fatalf("expected aggregated secondary used_percent 30, got %v", got)

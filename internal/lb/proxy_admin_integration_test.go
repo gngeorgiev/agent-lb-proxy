@@ -55,6 +55,7 @@ func TestProxyAdminImportListPinUnpinRemove(t *testing.T) {
 	var runtimeAuthPayload struct {
 		Tokens struct {
 			AccountID string `json:"account_id"`
+			IDToken   string `json:"id_token"`
 		} `json:"tokens"`
 	}
 	if err := json.Unmarshal(runtimeAuthResp.Auth, &runtimeAuthPayload); err != nil {
@@ -62,6 +63,13 @@ func TestProxyAdminImportListPinUnpinRemove(t *testing.T) {
 	}
 	if runtimeAuthPayload.Tokens.AccountID != "proxy-only" {
 		t.Fatalf("expected proxy-only runtime auth account id, got %q", runtimeAuthPayload.Tokens.AccountID)
+	}
+	claims, err := decodeJWTPayload(runtimeAuthPayload.Tokens.IDToken)
+	if err != nil {
+		t.Fatalf("decode runtime id_token: %v", err)
+	}
+	if got := nestedString(claims, "https://api.openai.com/auth", "chatgpt_plan_type"); got != "plus" {
+		t.Fatalf("expected proxy-only runtime plan type plus, got %q", got)
 	}
 	if runtimeAuthResp.SourceAlias != "alice" {
 		t.Fatalf("expected source alias alice, got %q", runtimeAuthResp.SourceAlias)

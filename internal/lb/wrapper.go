@@ -390,6 +390,10 @@ func fetchRemoteRuntimeAuth(proxyURL string) (AdminRuntimeAuthResponse, error) {
 	return payload, nil
 }
 
+type proxyOnlyRuntimeProfile struct {
+	PlanType string
+}
+
 func runtimeAuthCandidateIndexes(snapshot StoreFile, nowMS int64) []int {
 	candidates := make([]int, 0, len(snapshot.Accounts))
 	seen := make(map[int]struct{}, len(snapshot.Accounts))
@@ -415,15 +419,15 @@ func runtimeAuthCandidateIndexes(snapshot StoreFile, nowMS int64) []int {
 }
 
 func writeProxyOnlyRuntimeAuth(path string) error {
-	payload, err := proxyOnlyRuntimeAuthPayload()
+	payload, err := proxyOnlyRuntimeAuthPayload(proxyOnlyRuntimeProfile{})
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, payload, 0o600)
 }
 
-func proxyOnlyRuntimeAuthPayload() ([]byte, error) {
-	token := buildProxyOnlyAccessToken()
+func proxyOnlyRuntimeAuthPayload(profile proxyOnlyRuntimeProfile) ([]byte, error) {
+	token := buildProxyOnlyAccessToken(profile)
 	payload := map[string]any{
 		"auth_mode":      "chatgpt",
 		"OPENAI_API_KEY": nil,
@@ -442,13 +446,18 @@ func proxyOnlyRuntimeAuthPayload() ([]byte, error) {
 	return b, nil
 }
 
-func buildProxyOnlyAccessToken() string {
+func buildProxyOnlyAccessToken(profile proxyOnlyRuntimeProfile) string {
 	head := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	planType := strings.TrimSpace(profile.PlanType)
+	if planType == "" {
+		planType = "plus"
+	}
 	payload := map[string]any{
 		"sub": "codexlb-proxy-only",
 		"exp": int64(4102444800),
 		"https://api.openai.com/auth": map[string]any{
 			"chatgpt_account_id": "proxy-only",
+			"chatgpt_plan_type":  planType,
 		},
 		"https://api.openai.com/profile": map[string]any{
 			"email": "proxy-only@codexlb.internal",
@@ -457,6 +466,26 @@ func buildProxyOnlyAccessToken() string {
 	b, _ := json.Marshal(payload)
 	body := base64.RawURLEncoding.EncodeToString(b)
 	return head + "." + body + ".sig"
+}
+
+func planTypeForAccount(account Account) string {
+	auth, err := LoadAuth(account.HomeDir)
+	if err != nil {
+		return "plus"
+	}
+	for _, token := range []string{auth.IDToken, auth.AccessToken} {
+		if strings.TrimSpace(token) == "" {
+			continue
+		}
+		claims, err := decodeJWTPayload(token)
+		if err != nil {
+			continue
+		}
+		if planType := nestedString(claims, "https://api.openai.com/auth", "chatgpt_plan_type"); strings.TrimSpace(planType) != "" {
+			return planType
+		}
+	}
+	return "plus"
 }
 
 func formatShellCommand(bin string, args []string, env map[string]string) string {
