@@ -1046,6 +1046,10 @@ Examples:
 		return 1
 	}
 	url := resolveProxyURL(store, *proxyURL)
+	if err := lb.EnsureRuntimeAuth(store, url); err != nil {
+		fmt.Fprintf(os.Stderr, "sync runtime auth: %v\n", err)
+		return 1
+	}
 	url = strings.TrimRight(url, "/") + "/status"
 
 	client := &http.Client{Timeout: *timeout}

@@ -179,7 +179,7 @@ func RunCodex(store *Store, codexBin, proxyURL, codexHome string, args []string)
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		return 1, fmt.Errorf("create runtime CODEX_HOME: %w", err)
 	}
-	if err := seedRuntimeAuthIfMissing(store, codexHome, env["OPENAI_BASE_URL"]); err != nil {
+	if err := ensureRuntimeAuth(store, codexHome, env["OPENAI_BASE_URL"]); err != nil {
 		return 1, err
 	}
 
@@ -240,6 +240,20 @@ func resolveCodexInvocation(store *Store, codexBin, proxyURL, codexHome string, 
 		env["OPENAI_API_KEY"] = "codex-lb-local-key"
 	}
 	return codexBin, fullArgs, codexHome, env, snapshot.Settings.Run.InheritShell
+}
+
+func EnsureRuntimeAuth(store *Store, proxyURL string) error {
+	return ensureRuntimeAuth(store, store.RuntimeDir(), proxyURL)
+}
+
+func ensureRuntimeAuth(store *Store, codexHome, proxyURL string) error {
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		return fmt.Errorf("create runtime CODEX_HOME: %w", err)
+	}
+	if err := seedRuntimeAuthIfMissing(store, codexHome, proxyURL); err != nil {
+		return err
+	}
+	return nil
 }
 
 func seedRuntimeAuthIfMissing(store *Store, codexHome, proxyURL string) error {

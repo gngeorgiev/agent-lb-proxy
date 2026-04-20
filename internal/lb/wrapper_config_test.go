@@ -93,6 +93,37 @@ func TestSeedRuntimeAuthIfMissingCreatesProxyOnlyAuthWithoutAccounts(t *testing.
 	}
 }
 
+func TestEnsureRuntimeAuthRewritesStoreRuntimeHome(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	runtimeHome := store.RuntimeDir()
+	if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
+		t.Fatalf("mkdir runtime home: %v", err)
+	}
+	writeAuthForTest(t, runtimeHome, "acct-old", "old@example.com")
+
+	if err := EnsureRuntimeAuth(store, ""); err != nil {
+		t.Fatalf("EnsureRuntimeAuth: %v", err)
+	}
+
+	auth, err := LoadAuth(runtimeHome)
+	if err != nil {
+		t.Fatalf("LoadAuth(runtime): %v", err)
+	}
+	if auth.ChatGPTAccountID != "proxy-only" {
+		t.Fatalf("expected proxy-only account id, got %q", auth.ChatGPTAccountID)
+	}
+	if auth.UserEmail != "proxy-only@codexlb.internal" {
+		t.Fatalf("expected proxy-only email, got %q", auth.UserEmail)
+	}
+}
+
 func TestSeedRuntimeAuthIfMissingRepairsInvalidRuntimeAuth(t *testing.T) {
 	t.Parallel()
 
