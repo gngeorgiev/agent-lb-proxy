@@ -197,7 +197,7 @@ func (p *ProxyServer) handleAggregatedUsage(w http.ResponseWriter, r *http.Reque
 	if r.Method != http.MethodGet {
 		return false
 	}
-	if r.URL.Path != "/backend-api/wham/usage" && r.URL.Path != "/api/codex/usage" && r.URL.Path != "/usage" {
+	if r.URL.Path != "/backend-api/wham/usage" && r.URL.Path != "/wham/usage" && r.URL.Path != "/api/codex/usage" && r.URL.Path != "/usage" {
 		return false
 	}
 
