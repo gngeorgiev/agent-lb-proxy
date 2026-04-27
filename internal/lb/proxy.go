@@ -249,11 +249,9 @@ func (p *ProxyServer) handleAdmin(w http.ResponseWriter, r *http.Request) int {
 			return http.StatusInternalServerError
 		}
 		account := snapshot.Accounts[sel.Index]
-		proxyOnlyAuth, err := proxyOnlyRuntimeAuthPayload(proxyOnlyRuntimeProfile{
-			PlanType: planTypeForAccount(account),
-		})
+		authPayload, err := normalizedRuntimeAuthPayloadFromHome(account.HomeDir, account.ChatGPTAccountID)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("build proxy-only runtime auth: %v", err))
+			writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("load runtime auth for %s: %v", account.Alias, err))
 			return http.StatusInternalServerError
 		}
 		var rawConfig []byte
@@ -262,7 +260,7 @@ func (p *ProxyServer) handleAdmin(w http.ResponseWriter, r *http.Request) int {
 			rawConfig = data
 		}
 		writeJSON(w, http.StatusOK, AdminRuntimeAuthResponse{
-			Auth:        json.RawMessage(proxyOnlyAuth),
+			Auth:        json.RawMessage(authPayload),
 			Config:      string(rawConfig),
 			SourceAlias: account.Alias,
 		})

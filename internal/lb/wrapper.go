@@ -265,21 +265,35 @@ func seedRuntimeAuthIfMissing(store *Store, codexHome, proxyURL string) error {
 	snapshot := store.Snapshot()
 	if len(snapshot.Accounts) > 0 {
 		candidates := runtimeAuthCandidateIndexes(snapshot, time.Now().UnixMilli())
+		var lastErr error
 
 		for _, idx := range candidates {
-			if err := writeProxyOnlyRuntimeAuth(targetAuth); err != nil {
-				return fmt.Errorf("write proxy-only runtime auth.json: %w", err)
+			account := snapshot.Accounts[idx]
+			payload, err := normalizedRuntimeAuthPayloadFromHome(account.HomeDir, account.ChatGPTAccountID)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if err := os.WriteFile(targetAuth, payload, 0o600); err != nil {
+				return fmt.Errorf("write runtime auth.json from account %s: %w", account.Alias, err)
 			}
 			if err := syncRuntimeConfigForAccount(snapshot, idx, codexHome); err != nil {
 				return err
 			}
 			return nil
 		}
+		if lastErr != nil {
+			return lastErr
+		}
 	}
 
 	if remoteAuth, err := fetchRemoteRuntimeAuth(proxyURL); err == nil {
-		if err := writeProxyOnlyRuntimeAuth(targetAuth); err != nil {
-			return fmt.Errorf("write proxy-only runtime auth.json: %w", err)
+		payload, err := normalizeRuntimeAuthPayload(remoteAuth.Auth, "")
+		if err != nil {
+			return fmt.Errorf("normalize remote runtime auth payload: %w", err)
+		}
+		if err := os.WriteFile(targetAuth, payload, 0o600); err != nil {
+			return fmt.Errorf("write runtime auth.json from remote runtime auth: %w", err)
 		}
 		if err := syncRuntimeConfigFromRemote(remoteAuth, codexHome); err != nil {
 			return err
@@ -438,6 +452,19 @@ func writeProxyOnlyRuntimeAuth(path string) error {
 		return err
 	}
 	return os.WriteFile(path, payload, 0o600)
+}
+
+func normalizedRuntimeAuthPayloadFromHome(homeDir, fallbackAccountID string) ([]byte, error) {
+	path := filepath.Join(homeDir, "auth.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	payload, err := normalizeRuntimeAuthPayload(raw, fallbackAccountID)
+	if err != nil {
+		return nil, fmt.Errorf("normalize %s: %w", path, err)
+	}
+	return payload, nil
 }
 
 func proxyOnlyRuntimeAuthPayload(profile proxyOnlyRuntimeProfile) ([]byte, error) {

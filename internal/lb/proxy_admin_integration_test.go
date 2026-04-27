@@ -26,7 +26,10 @@ func TestProxyAdminImportListPinUnpinRemove(t *testing.T) {
 	if err := os.MkdirAll(source, 0o700); err != nil {
 		t.Fatalf("mkdir source: %v", err)
 	}
-	token := testAdminJWT(map[string]any{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-a"}})
+	token := testAdminJWT(map[string]any{"https://api.openai.com/auth": map[string]any{
+		"chatgpt_account_id": "acct-a",
+		"chatgpt_plan_type":  "plus",
+	}})
 	auth := map[string]any{"tokens": map[string]any{"access_token": token, "account_id": "acct-a"}}
 	b, _ := json.Marshal(auth)
 	if err := os.WriteFile(filepath.Join(source, "auth.json"), b, 0o600); err != nil {
@@ -56,20 +59,28 @@ func TestProxyAdminImportListPinUnpinRemove(t *testing.T) {
 		Tokens struct {
 			AccountID string `json:"account_id"`
 			IDToken   string `json:"id_token"`
+			Access    string `json:"access_token"`
+			Refresh   string `json:"refresh_token"`
 		} `json:"tokens"`
 	}
 	if err := json.Unmarshal(runtimeAuthResp.Auth, &runtimeAuthPayload); err != nil {
 		t.Fatalf("unmarshal runtime auth payload: %v", err)
 	}
-	if runtimeAuthPayload.Tokens.AccountID != "proxy-only" {
-		t.Fatalf("expected proxy-only runtime auth account id, got %q", runtimeAuthPayload.Tokens.AccountID)
+	if runtimeAuthPayload.Tokens.AccountID != "acct-a" {
+		t.Fatalf("expected runtime auth account id acct-a, got %q", runtimeAuthPayload.Tokens.AccountID)
 	}
 	claims, err := decodeJWTPayload(runtimeAuthPayload.Tokens.IDToken)
 	if err != nil {
 		t.Fatalf("decode runtime id_token: %v", err)
 	}
 	if got := nestedString(claims, "https://api.openai.com/auth", "chatgpt_plan_type"); got != "plus" {
-		t.Fatalf("expected proxy-only runtime plan type plus, got %q", got)
+		t.Fatalf("expected runtime plan type plus, got %q", got)
+	}
+	if runtimeAuthPayload.Tokens.IDToken != runtimeAuthPayload.Tokens.Access {
+		t.Fatalf("expected normalized id_token to match access_token")
+	}
+	if runtimeAuthPayload.Tokens.Refresh != runtimeAuthPayload.Tokens.Access {
+		t.Fatalf("expected normalized refresh_token to match access_token")
 	}
 	if runtimeAuthResp.SourceAlias != "alice" {
 		t.Fatalf("expected source alias alice, got %q", runtimeAuthResp.SourceAlias)

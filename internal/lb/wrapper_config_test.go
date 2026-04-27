@@ -198,8 +198,8 @@ func TestSeedRuntimeAuthIfMissingRefreshesExistingRuntimeAuthFromSelectedAccount
 	if err != nil {
 		t.Fatalf("LoadAuth(runtime): %v", err)
 	}
-	if auth.ChatGPTAccountID != "proxy-only" {
-		t.Fatalf("expected refreshed runtime account proxy-only, got %q", auth.ChatGPTAccountID)
+	if auth.ChatGPTAccountID != "acct-b" {
+		t.Fatalf("expected refreshed runtime account acct-b, got %q", auth.ChatGPTAccountID)
 	}
 }
 
@@ -466,8 +466,8 @@ func TestSeedRuntimeAuthIfMissingDoesNotBorrowDifferentAccountConfig(t *testing.
 	if err != nil {
 		t.Fatalf("LoadAuth(runtime): %v", err)
 	}
-	if auth.ChatGPTAccountID != "proxy-only" {
-		t.Fatalf("expected runtime account proxy-only, got %q", auth.ChatGPTAccountID)
+	if auth.ChatGPTAccountID != "acct-b" {
+		t.Fatalf("expected runtime account acct-b, got %q", auth.ChatGPTAccountID)
 	}
 
 	gotConfig, err := os.ReadFile(filepath.Join(runtimeHome, "config.toml"))
