@@ -346,6 +346,129 @@ func TestProxyReturnsAggregatedUsageForCodexStatusWithRealRuntimeAuth(t *testing
 	}
 }
 
+func TestProxyReturnsBackendCompatibleIntegerUsageForCodexStatus(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	store, err := OpenStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	tokenA := testJWT(map[string]any{
+		"https://api.openai.com/auth":    map[string]any{"chatgpt_account_id": "acct-a"},
+		"https://api.openai.com/profile": map[string]any{"email": "a@example.com"},
+	})
+	tokenB := testJWT(map[string]any{
+		"https://api.openai.com/auth":    map[string]any{"chatgpt_account_id": "acct-b"},
+		"https://api.openai.com/profile": map[string]any{"email": "b@example.com"},
+	})
+
+	homeA := filepath.Join(tmp, "acc-a")
+	homeB := filepath.Join(tmp, "acc-b")
+	writeAuthFile(t, homeA, tokenA, "acct-a")
+	writeAuthFile(t, homeB, tokenB, "acct-b")
+
+	now := time.Now()
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Settings.Proxy.UpstreamBaseURL = "https://chatgpt.com/backend-api"
+		sf.Accounts = []Account{
+			{
+				ID:      "a",
+				Alias:   "a",
+				HomeDir: homeA,
+				BaseURL: sf.Settings.Proxy.UpstreamBaseURL,
+				Enabled: true,
+				Quota: QuotaState{
+					DailyLimit:    100,
+					DailyUsed:     17,
+					DailyResetAt:  now.Add(3 * time.Hour).Unix(),
+					WeeklyLimit:   100,
+					WeeklyUsed:    31,
+					WeeklyResetAt: now.Add(5 * 24 * time.Hour).Unix(),
+					LastSyncAt:    now.UnixMilli(),
+					Source:        "manual",
+				},
+			},
+			{
+				ID:      "b",
+				Alias:   "b",
+				HomeDir: homeB,
+				BaseURL: sf.Settings.Proxy.UpstreamBaseURL,
+				Enabled: true,
+				Quota: QuotaState{
+					DailyLimit:    100,
+					DailyUsed:     18,
+					DailyResetAt:  now.Add(2 * time.Hour).Unix(),
+					WeeklyLimit:   100,
+					WeeklyUsed:    38,
+					WeeklyResetAt: now.Add(4 * 24 * time.Hour).Unix(),
+					LastSyncAt:    now.UnixMilli(),
+					Source:        "manual",
+				},
+			},
+			{
+				ID:      "c",
+				Alias:   "c",
+				HomeDir: homeB,
+				BaseURL: sf.Settings.Proxy.UpstreamBaseURL,
+				Enabled: true,
+				Quota: QuotaState{
+					DailyLimit:    100,
+					DailyUsed:     19,
+					DailyResetAt:  now.Add(4 * time.Hour).Unix(),
+					WeeklyLimit:   100,
+					WeeklyUsed:    34,
+					WeeklyResetAt: now.Add(6 * 24 * time.Hour).Unix(),
+					LastSyncAt:    now.UnixMilli(),
+					Source:        "manual",
+				},
+			},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	proxySrv := httptest.NewServer(NewProxyServer(store, nil, nil))
+	defer proxySrv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, proxySrv.URL+"/api/codex/usage", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenA)
+	req.Header.Set("ChatGPT-Account-Id", "acct-a")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET usage: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, string(body))
+	}
+
+	var payload struct {
+		RateLimit struct {
+			PrimaryWindow struct {
+				UsedPercent int `json:"used_percent"`
+			} `json:"primary_window"`
+			SecondaryWindow struct {
+				UsedPercent int `json:"used_percent"`
+			} `json:"secondary_window"`
+		} `json:"rate_limit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode backend-compatible usage payload: %v", err)
+	}
+	if got := payload.RateLimit.PrimaryWindow.UsedPercent; got != 18 {
+		t.Fatalf("expected rounded primary used_percent 18, got %d", got)
+	}
+	if got := payload.RateLimit.SecondaryWindow.UsedPercent; got != 34 {
+		t.Fatalf("expected rounded secondary used_percent 34, got %d", got)
+	}
+}
+
 func TestProxyReturnsAggregatedUsageForProxyOnlyRuntimeAuthAtRootUsagePath(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()

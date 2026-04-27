@@ -181,6 +181,8 @@ func aggregateUsageResponse(status ProxyStatus, now time.Time) usageResponse {
 		}
 		return clampUsagePercent(100 - a.WeeklyLeftPct), a.WeeklyResetAt
 	})
+	dailyUsedPercent = normalizeUsagePercentForBackend(dailyUsedPercent)
+	weeklyUsedPercent = normalizeUsagePercentForBackend(weeklyUsedPercent)
 
 	var payload usageResponse
 	payload.UserID = "proxy-only"
@@ -235,6 +237,10 @@ func aggregateUsageWindow(accounts []AccountStatus, now time.Time, extract func(
 
 func clampUsagePercent(v float64) float64 {
 	return math.Max(0, math.Min(100, v))
+}
+
+func normalizeUsagePercentForBackend(v float64) float64 {
+	return clampUsagePercent(math.Round(v))
 }
 
 func maxInt64(a, b int64) int64 {
