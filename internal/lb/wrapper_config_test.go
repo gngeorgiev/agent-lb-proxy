@@ -2,6 +2,7 @@ package lb
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -203,6 +204,67 @@ func TestSeedRuntimeAuthIfMissingRefreshesExistingRuntimeAuthFromSelectedAccount
 	}
 }
 
+func TestSeedRuntimeAuthIfMissingMasksRuntimeIDTokenDisplayForRealAccount(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	accountHome := filepath.Join(root, "acc-a")
+	if err := os.MkdirAll(accountHome, 0o700); err != nil {
+		t.Fatalf("mkdir account home: %v", err)
+	}
+	writeAuthForTest(t, accountHome, "acct-a", "real@example.com")
+
+	if err := store.Update(func(sf *StoreFile) error {
+		sf.Accounts = []Account{
+			{Alias: "a", ID: "openai:a", HomeDir: accountHome, Enabled: true},
+		}
+		sf.State.ActiveIndex = 0
+		return nil
+	}); err != nil {
+		t.Fatalf("store update: %v", err)
+	}
+
+	runtimeHome := filepath.Join(root, "runtime-masked-local")
+	if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
+		t.Fatalf("mkdir runtime home: %v", err)
+	}
+	if err := seedRuntimeAuthIfMissing(store, runtimeHome, ""); err != nil {
+		t.Fatalf("seedRuntimeAuthIfMissing: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(runtimeHome, "auth.json"))
+	if err != nil {
+		t.Fatalf("read runtime auth.json: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal runtime auth payload: %v", err)
+	}
+	tokens, _ := payload["tokens"].(map[string]any)
+	if got, _ := tokens["account_id"].(string); got != "acct-a" {
+		t.Fatalf("tokens.account_id = %q, want acct-a", got)
+	}
+	if got, _ := tokens["refresh_token"].(string); got == "" {
+		t.Fatalf("expected runtime refresh_token")
+	}
+	idToken, _ := tokens["id_token"].(string)
+	idClaims, err := decodeJWTPayload(idToken)
+	if err != nil {
+		t.Fatalf("decode runtime id_token: %v", err)
+	}
+	if got := stringField(idClaims["email"]); got != "proxy-only@codexlb.internal" {
+		t.Fatalf("runtime id_token email = %q", got)
+	}
+	if got := nestedString(idClaims, "https://api.openai.com/auth", "chatgpt_account_id"); got != "acct-a" {
+		t.Fatalf("runtime id_token account id = %q", got)
+	}
+}
+
 func TestSeedRuntimeAuthIfMissingFetchesFromRemoteProxy(t *testing.T) {
 	t.Parallel()
 
@@ -255,6 +317,84 @@ func TestSeedRuntimeAuthIfMissingFetchesFromRemoteProxy(t *testing.T) {
 	}
 	if got, _ := tokens["refresh_token"].(string); got != accessToken {
 		t.Fatalf("expected refresh_token to match access_token, got %q want %q", got, accessToken)
+	}
+}
+
+func TestSeedRuntimeAuthIfMissingMasksRemoteRuntimeIDTokenDisplayForRealAccount(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	accessToken := testJWT(map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": "acct-remote",
+		},
+		"https://api.openai.com/profile": map[string]any{
+			"email": "real@example.com",
+		},
+	})
+	idToken := testJWT(map[string]any{
+		"email": "real@example.com",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": "acct-remote",
+			"chatgpt_plan_type":  "plus",
+		},
+		"https://api.openai.com/profile": map[string]any{
+			"email": "real@example.com",
+		},
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/admin/runtime-auth" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(AdminRuntimeAuthResponse{
+			Auth: json.RawMessage(fmt.Sprintf(`{"auth_mode":"chatgpt","tokens":{"access_token":"%s","refresh_token":"refresh-remote","id_token":"%s","account_id":"acct-remote"}}`, accessToken, idToken)),
+		})
+	}))
+	defer server.Close()
+
+	runtimeHome := filepath.Join(root, "runtime-remote-masked")
+	if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
+		t.Fatalf("mkdir runtime home: %v", err)
+	}
+	if err := seedRuntimeAuthIfMissing(store, runtimeHome, server.URL); err != nil {
+		t.Fatalf("seedRuntimeAuthIfMissing: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(runtimeHome, "auth.json"))
+	if err != nil {
+		t.Fatalf("read runtime auth.json: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal runtime auth payload: %v", err)
+	}
+	tokens, _ := payload["tokens"].(map[string]any)
+	if got, _ := tokens["account_id"].(string); got != "acct-remote" {
+		t.Fatalf("tokens.account_id = %q, want acct-remote", got)
+	}
+	if got, _ := tokens["refresh_token"].(string); got != "refresh-remote" {
+		t.Fatalf("tokens.refresh_token = %q, want refresh-remote", got)
+	}
+	maskedIDToken, _ := tokens["id_token"].(string)
+	if maskedIDToken == idToken {
+		t.Fatalf("expected remote runtime id_token to be rewritten for display")
+	}
+	idClaims, err := decodeJWTPayload(maskedIDToken)
+	if err != nil {
+		t.Fatalf("decode masked remote id_token: %v", err)
+	}
+	if got := stringField(idClaims["email"]); got != "proxy-only@codexlb.internal" {
+		t.Fatalf("masked remote id_token email = %q", got)
+	}
+	if got := nestedString(idClaims, "https://api.openai.com/auth", "chatgpt_account_id"); got != "acct-remote" {
+		t.Fatalf("masked remote id_token account id = %q", got)
 	}
 }
 

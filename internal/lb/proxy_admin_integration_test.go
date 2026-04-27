@@ -76,8 +76,8 @@ func TestProxyAdminImportListPinUnpinRemove(t *testing.T) {
 	if got := nestedString(claims, "https://api.openai.com/auth", "chatgpt_plan_type"); got != "plus" {
 		t.Fatalf("expected runtime plan type plus, got %q", got)
 	}
-	if runtimeAuthPayload.Tokens.IDToken != runtimeAuthPayload.Tokens.Access {
-		t.Fatalf("expected normalized id_token to match access_token")
+	if got := stringField(claims["email"]); got != "proxy-only@codexlb.internal" {
+		t.Fatalf("expected runtime id_token email to be proxy-only, got %q", got)
 	}
 	if runtimeAuthPayload.Tokens.Refresh != runtimeAuthPayload.Tokens.Access {
 		t.Fatalf("expected normalized refresh_token to match access_token")

@@ -632,6 +632,9 @@ func normalizeRuntimeAuthPayload(raw []byte, fallbackAccountID string) ([]byte, 
 	if strings.TrimSpace(stringField(tokens["account_id"])) == "" && strings.TrimSpace(fallbackAccountID) != "" {
 		tokens["account_id"] = fallbackAccountID
 	}
+	if err := rewriteRuntimeDisplayIDToken(tokens); err != nil {
+		return nil, fmt.Errorf("rewrite runtime display id_token: %w", err)
+	}
 	payload["tokens"] = tokens
 
 	normalized, err := json.Marshal(payload)
@@ -644,4 +647,68 @@ func normalizeRuntimeAuthPayload(raw []byte, fallbackAccountID string) ([]byte, 
 func stringField(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func rewriteRuntimeDisplayIDToken(tokens map[string]any) error {
+	accountID := strings.TrimSpace(stringField(tokens["account_id"]))
+	if accountID == "proxy-only" {
+		return nil
+	}
+
+	sourceToken := strings.TrimSpace(stringField(tokens["id_token"]))
+	if sourceToken == "" {
+		sourceToken = strings.TrimSpace(stringField(tokens["access_token"]))
+	}
+	if sourceToken == "" {
+		return fmt.Errorf("missing source token")
+	}
+
+	claims, err := decodeJWTPayload(sourceToken)
+	if err != nil {
+		return err
+	}
+	authClaims := nestedMap(claims, "https://api.openai.com/auth")
+	if accountID == "" {
+		accountID = strings.TrimSpace(stringField(authClaims["chatgpt_account_id"]))
+	}
+	if accountID == "proxy-only" {
+		return nil
+	}
+	if accountID != "" {
+		authClaims["chatgpt_account_id"] = accountID
+	}
+	claims["https://api.openai.com/auth"] = authClaims
+
+	const proxyDisplayEmail = "proxy-only@codexlb.internal"
+	claims["email"] = proxyDisplayEmail
+	profileClaims := nestedMap(claims, "https://api.openai.com/profile")
+	profileClaims["email"] = proxyDisplayEmail
+	claims["https://api.openai.com/profile"] = profileClaims
+
+	idToken, err := buildUnsignedJWT(claims)
+	if err != nil {
+		return err
+	}
+	tokens["id_token"] = idToken
+	return nil
+}
+
+func nestedMap(root map[string]any, key string) map[string]any {
+	if root == nil {
+		return map[string]any{}
+	}
+	if out, _ := root[key].(map[string]any); out != nil {
+		return out
+	}
+	return map[string]any{}
+}
+
+func buildUnsignedJWT(claims map[string]any) (string, error) {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	bodyBytes, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	body := base64.RawURLEncoding.EncodeToString(bodyBytes)
+	return header + "." + body + ".sig", nil
 }
